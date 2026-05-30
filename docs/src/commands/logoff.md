@@ -7,8 +7,24 @@ Recursive into submodules; output is deterministic and greppable.
 ## Synopsis
 
 ```sh
-gkit logoff [path] [--verbose] [--no-fetch] [--base-branch <b>]
+gkit logoff [path…] [--verbose] [--no-fetch] [--base-branch <b>]
+gkit logoff --conf <conf…>      # check every repo listed in the conf(s)
 ```
+
+- `gkit logoff` — the repo at the current directory.
+- `gkit logoff <path>…` — those repo(s) + their submodules.
+- `gkit logoff --conf <conf…>` — **fleet mode**: check every repo listed in the
+  given clone conf(s). Conf args are required (a bare `--conf` errors); they may be
+  files from **different directories** and/or dirs (each expands to its `*.toml`).
+  Use a glob for "all in here":
+
+```sh
+gkit logoff --conf *.toml                 # every repo in the cwd's confs
+gkit logoff --conf ~/a/x.toml ~/b/y.toml  # confs from different directories
+```
+
+In fleet mode each repo resolves its own base branch (`gkit.baseBranch` → HEAD).
+Exit is non-zero if any repo fails a check or any conf fails to parse.
 
 ## The five checks
 

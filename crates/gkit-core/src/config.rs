@@ -34,7 +34,11 @@ pub fn current_branch_opt(git: &dyn Git, dir: &Path) -> Option<String> {
 /// Resolve the base branch to *switch to* (for stmb). Unlike [`resolve_base_branch`]
 /// this never falls back to HEAD (HEAD is the feature branch here): CLI override →
 /// `gkit.baseBranch` → `origin/HEAD` default branch. `None` if undeterminable.
-pub fn resolve_switch_base(git: &dyn Git, dir: &Path, cli_override: Option<&str>) -> Option<String> {
+pub fn resolve_switch_base(
+    git: &dyn Git,
+    dir: &Path,
+    cli_override: Option<&str>,
+) -> Option<String> {
     if let Some(b) = cli_override {
         if !b.trim().is_empty() {
             return Some(b.trim().to_string());
@@ -44,7 +48,10 @@ pub fn resolve_switch_base(git: &dyn Git, dir: &Path, cli_override: Option<&str>
     if cfg.success && !cfg.trimmed().is_empty() {
         return Some(cfg.trimmed().to_string());
     }
-    let head = git.run(dir, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+    let head = git.run(
+        dir,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    );
     if head.success {
         return head.trimmed().strip_prefix("origin/").map(str::to_string);
     }
@@ -92,11 +99,15 @@ mod tests {
     #[test]
     fn switch_base_uses_origin_head_not_current() {
         // config unset -> use origin/HEAD default, NOT the (feature) HEAD
-        let g = FakeGit::new()
-            .fail("config --get gkit.baseBranch")
-            .ok("symbolic-ref --short refs/remotes/origin/HEAD", "origin/dev");
+        let g = FakeGit::new().fail("config --get gkit.baseBranch").ok(
+            "symbolic-ref --short refs/remotes/origin/HEAD",
+            "origin/dev",
+        );
         assert_eq!(resolve_switch_base(&g, d(), None), Some("dev".into()));
         // override still wins
-        assert_eq!(resolve_switch_base(&g, d(), Some("main")), Some("main".into()));
+        assert_eq!(
+            resolve_switch_base(&g, d(), Some("main")),
+            Some("main".into())
+        );
     }
 }

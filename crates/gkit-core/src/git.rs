@@ -67,7 +67,11 @@ pub mod test_support {
         pub fn ok(mut self, args: &str, stdout: &str) -> Self {
             self.responses.insert(
                 args.to_string(),
-                GitOutput { stdout: stdout.to_string(), stderr: String::new(), success: true },
+                GitOutput {
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                    success: true,
+                },
             );
             self
         }
@@ -76,7 +80,11 @@ pub mod test_support {
         pub fn fail(mut self, args: &str) -> Self {
             self.responses.insert(
                 args.to_string(),
-                GitOutput { stdout: String::new(), stderr: String::new(), success: false },
+                GitOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    success: false,
+                },
             );
             self
         }
@@ -86,7 +94,11 @@ pub mod test_support {
         pub fn ok_in(mut self, dir: &str, args: &str, stdout: &str) -> Self {
             self.responses.insert(
                 format!("{dir}\u{0}{args}"),
-                GitOutput { stdout: stdout.to_string(), stderr: String::new(), success: true },
+                GitOutput {
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                    success: true,
+                },
             );
             self
         }
@@ -103,7 +115,10 @@ pub mod test_support {
                 .cloned()
                 .unwrap_or(GitOutput {
                     stdout: String::new(),
-                    stderr: format!("FakeGit: no response for `git {joined}` in {}", dir.display()),
+                    stderr: format!(
+                        "FakeGit: no response for `git {joined}` in {}",
+                        dir.display()
+                    ),
                     success: false,
                 })
         }

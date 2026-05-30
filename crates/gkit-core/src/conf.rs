@@ -73,9 +73,14 @@ pub struct Repo {
 impl Repo {
     /// Remote repo name (drives the clone URL): explicit `name`, else basename(dir).
     pub fn name(&self) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| self.dir.trim_end_matches('/').rsplit('/').next().unwrap_or(&self.dir).to_string())
+        self.name.clone().unwrap_or_else(|| {
+            self.dir
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&self.dir)
+                .to_string()
+        })
     }
 }
 
@@ -202,14 +207,19 @@ mod tests {
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let m: HashMap<String, String> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let m: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         move |k| m.get(k).cloned()
     }
 
     #[test]
     fn parses_minimal_toml() {
-        let c = parse("host = \"tlbb\"\nnamespace = \"codogenics\"\n[[repo]]\ndir = \"$CP_HOME/cp-conf\"\n").unwrap();
+        let c = parse(
+            "host = \"tlbb\"\nnamespace = \"codogenics\"\n[[repo]]\ndir = \"$CP_HOME/cp-conf\"\n",
+        )
+        .unwrap();
         assert_eq!(c.host, "tlbb");
         assert_eq!(c.namespace, "codogenics");
         assert_eq!(c.repo.len(), 1);
@@ -251,17 +261,24 @@ post-clone = ["mill compile", "echo done"]
     #[test]
     fn name_overrides_basename_for_url() {
         // clone the remote repo `cosp` into a differently-named local dir
-        let c = parse("host=\"h\"\nnamespace=\"o\"\n[[repo]]\ndir=\"$HOME/work/my-cosp\"\nname=\"cosp\"\n").unwrap();
+        let c = parse(
+            "host=\"h\"\nnamespace=\"o\"\n[[repo]]\ndir=\"$HOME/work/my-cosp\"\nname=\"cosp\"\n",
+        )
+        .unwrap();
         assert_eq!(c.repo[0].name(), "cosp"); // URL uses `cosp`, dir is `my-cosp`
-        // default (no name) still uses basename
-        let d = parse("host=\"h\"\nnamespace=\"o\"\n[[repo]]\ndir=\"$HOME/work/my-cosp\"\n").unwrap();
+                                              // default (no name) still uses basename
+        let d =
+            parse("host=\"h\"\nnamespace=\"o\"\n[[repo]]\ndir=\"$HOME/work/my-cosp\"\n").unwrap();
         assert_eq!(d.repo[0].name(), "my-cosp");
     }
 
     #[test]
     fn requires_host_and_namespace() {
         assert!(parse("namespace = \"o\"\n").unwrap_err().contains("host"));
-        assert!(parse("host = \"h\"\n").unwrap_err().to_lowercase().contains("namespace"));
+        assert!(parse("host = \"h\"\n")
+            .unwrap_err()
+            .to_lowercase()
+            .contains("namespace"));
     }
 
     #[test]
@@ -271,8 +288,14 @@ post-clone = ["mill compile", "echo done"]
 
     #[test]
     fn scp_url_parses_alias_form_only() {
-        assert_eq!(scp_url_parts("tlbb:codogenics/cosp.git"), Some(("tlbb".into(), "codogenics".into())));
-        assert_eq!(scp_url_parts("ctl:grp/sub/repo.git"), Some(("ctl".into(), "grp/sub".into()))); // gitlab subgroup
+        assert_eq!(
+            scp_url_parts("tlbb:codogenics/cosp.git"),
+            Some(("tlbb".into(), "codogenics".into()))
+        );
+        assert_eq!(
+            scp_url_parts("ctl:grp/sub/repo.git"),
+            Some(("ctl".into(), "grp/sub".into()))
+        ); // gitlab subgroup
         assert_eq!(scp_url_parts("git@github.com:org/repo.git"), None); // user@ form -> skip
         assert_eq!(scp_url_parts("https://github.com/org/repo.git"), None); // https -> skip
         assert_eq!(scp_url_parts("tlbb:noslash"), None);

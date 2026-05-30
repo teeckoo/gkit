@@ -8,7 +8,9 @@ use std::path::Path;
 
 /// Current checked-out branch (`git rev-parse --abbrev-ref HEAD`); "HEAD" if detached.
 pub fn current_branch(git: &dyn Git, dir: &Path) -> String {
-    git.run(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).trimmed().to_string()
+    git.run(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .trimmed()
+        .to_string()
 }
 
 /// 1. Nothing uncommitted: `git status -s` is empty.
@@ -19,27 +21,40 @@ pub fn committed(git: &dyn Git, dir: &Path) -> bool {
 /// 2. Every local commit exists on some remote:
 ///    `git log --oneline --branches --not --remotes` is empty.
 pub fn all_commits_pushed(git: &dyn Git, dir: &Path) -> bool {
-    git.run(dir, &["log", "--oneline", "--branches", "--not", "--remotes"])
-        .trimmed()
-        .is_empty()
+    git.run(
+        dir,
+        &["log", "--oneline", "--branches", "--not", "--remotes"],
+    )
+    .trimmed()
+    .is_empty()
 }
 
 /// 3. Every local branch has a remote counterpart (matched by short name).
 pub fn branches_have_remote(git: &dyn Git, dir: &Path) -> bool {
     let remotes: HashSet<String> = git
-        .run(dir, &["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/*"])
+        .run(
+            dir,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/remotes/origin/*",
+            ],
+        )
         .stdout
         .lines()
         .filter_map(|l| l.trim().strip_prefix("origin/").map(str::to_string))
         .filter(|b| b != "HEAD")
         .collect();
 
-    git.run(dir, &["for-each-ref", "--format=%(refname:short)", "refs/heads/*"])
-        .stdout
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .all(|local| remotes.contains(local))
+    git.run(
+        dir,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads/*"],
+    )
+    .stdout
+    .lines()
+    .map(str::trim)
+    .filter(|l| !l.is_empty())
+    .all(|local| remotes.contains(local))
 }
 
 /// 4. Current branch is not behind `origin/<branch>` (nothing to pull).
@@ -82,7 +97,10 @@ pub fn correct_branch(git: &dyn Git, dir: &Path, base_branch: &str) -> bool {
         .run(dir, &["ls-remote", "--heads", "origin"])
         .stdout
         .lines()
-        .filter_map(|l| l.split_once("refs/heads/").map(|(_, b)| b.trim().to_string()))
+        .filter_map(|l| {
+            l.split_once("refs/heads/")
+                .map(|(_, b)| b.trim().to_string())
+        })
         .any(|b| !is_integration(&b, base_branch));
     !has_feature
 }
@@ -134,7 +152,10 @@ mod tests {
     #[test]
     fn committed_is_true_when_status_clean() {
         assert!(committed(&FakeGit::new().ok("status -s", ""), d()));
-        assert!(!committed(&FakeGit::new().ok("status -s", " M file.rs"), d()));
+        assert!(!committed(
+            &FakeGit::new().ok("status -s", " M file.rs"),
+            d()
+        ));
     }
 
     #[test]
@@ -148,13 +169,22 @@ mod tests {
     #[test]
     fn branches_have_remote_checks_every_local() {
         let ok = FakeGit::new()
-            .ok("for-each-ref --format=%(refname:short) refs/remotes/origin/*", "origin/dev\norigin/main\norigin/HEAD")
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/remotes/origin/*",
+                "origin/dev\norigin/main\norigin/HEAD",
+            )
             .ok("for-each-ref --format=%(refname:short) refs/heads/*", "dev");
         assert!(branches_have_remote(&ok, d()));
 
         let missing = FakeGit::new()
-            .ok("for-each-ref --format=%(refname:short) refs/remotes/origin/*", "origin/dev")
-            .ok("for-each-ref --format=%(refname:short) refs/heads/*", "dev\nlocal-only");
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/remotes/origin/*",
+                "origin/dev",
+            )
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/heads/*",
+                "dev\nlocal-only",
+            );
         assert!(!branches_have_remote(&missing, d()));
     }
 
@@ -184,9 +214,10 @@ mod tests {
     #[test]
     fn correct_branch_only_flags_base_with_features() {
         // On base (dev) AND remote has a feature branch -> wrong branch.
-        let on_base_with_feature = FakeGit::new()
-            .ok("rev-parse --abbrev-ref HEAD", "dev")
-            .ok("ls-remote --heads origin", "aaa\trefs/heads/dev\nbbb\trefs/heads/feature-x");
+        let on_base_with_feature = FakeGit::new().ok("rev-parse --abbrev-ref HEAD", "dev").ok(
+            "ls-remote --heads origin",
+            "aaa\trefs/heads/dev\nbbb\trefs/heads/feature-x",
+        );
         assert!(!correct_branch(&on_base_with_feature, d(), "dev"));
 
         // On base (dev), no feature branches -> fine.
@@ -201,15 +232,17 @@ mod tests {
 
         // On dev, remote has dev + main (both integration) -> NOT a feature -> fine.
         // (This is the cosp/manage-cms case that was wrongly flagged before.)
-        let dev_plus_main = FakeGit::new()
-            .ok("rev-parse --abbrev-ref HEAD", "dev")
-            .ok("ls-remote --heads origin", "aaa\trefs/heads/dev\nbbb\trefs/heads/main");
+        let dev_plus_main = FakeGit::new().ok("rev-parse --abbrev-ref HEAD", "dev").ok(
+            "ls-remote --heads origin",
+            "aaa\trefs/heads/dev\nbbb\trefs/heads/main",
+        );
         assert!(correct_branch(&dev_plus_main, d(), "dev"));
 
         // On main (an integration branch) with a real feature present -> flagged.
-        let on_main_with_feature = FakeGit::new()
-            .ok("rev-parse --abbrev-ref HEAD", "main")
-            .ok("ls-remote --heads origin", "aaa\trefs/heads/main\nbbb\trefs/heads/feature-y");
+        let on_main_with_feature = FakeGit::new().ok("rev-parse --abbrev-ref HEAD", "main").ok(
+            "ls-remote --heads origin",
+            "aaa\trefs/heads/main\nbbb\trefs/heads/feature-y",
+        );
         assert!(!correct_branch(&on_main_with_feature, d(), "dev"));
     }
 
@@ -219,7 +252,10 @@ mod tests {
             .ok("rev-parse --abbrev-ref HEAD", "dev")
             .ok("status -s", "")
             .ok("log --oneline --branches --not --remotes", "")
-            .ok("for-each-ref --format=%(refname:short) refs/remotes/origin/*", "origin/dev")
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/remotes/origin/*",
+                "origin/dev",
+            )
             .ok("for-each-ref --format=%(refname:short) refs/heads/*", "dev")
             .ok("show-ref --quiet refs/remotes/origin/dev", "")
             .ok("rev-list --left-right --count origin/dev...dev", "0\t0")

@@ -5,6 +5,7 @@ git/ssh chores: provision ssh keys, clone a fleet of repos (with pre/post hooks)
 verify everything is committed & pushed before you log off, and finish a feature
 branch — all explicit, all printed, no hidden state.
 
+[![CI](https://github.com/teeckoo/gkit/actions/workflows/ci.yml/badge.svg)](https://github.com/teeckoo/gkit/actions/workflows/ci.yml)
 [![Release](https://github.com/teeckoo/gkit/actions/workflows/release.yml/badge.svg)](https://github.com/teeckoo/gkit/actions/workflows/release.yml)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 
@@ -40,13 +41,20 @@ cargo install --git https://github.com/teeckoo/gkit gkit
 
 ## Commands
 
+**SSH key layer (start here — every workflow needs a key first):**
+
+| Command | What it does |
+|---|---|
+| `gkit key add\|copy\|list` | Generate `id_<alias>`, manage the gkit-owned `~/.ssh/git_users` (OS-aware), copy a public key, list identities. |
+
+**Repo layer (the everyday loop, once a key is in place):**
+
 | Command | What it does |
 |---|---|
 | `gkit init [file]` | Scaffold a starter clone conf in the cwd (`host`/`namespace` inferred from `origin` when possible). |
 | `gkit clone [paths…]` | Clone repos from conf file(s) or a directory (default: every `*.toml` in the cwd); submodules switched onto their branch, `.envrc` trusted, every command printed. |
-| `gkit logoff [path]` | Is every repo **+ submodule** committed and pushed? Exit 0 = all clear. `--verbose` for a greppable per-check breakdown. |
+| `gkit logoff [path…]` | Is every repo **+ submodule** committed and pushed? Exit 0 = all clear. `--verbose` for a greppable per-check breakdown; **`--conf <conf…>`** to check every repo in your clone conf(s). |
 | `gkit stmb [path]` | "Switch to main branch": return to the base branch, update it, and **safe-delete** the finished feature branch — recursively across submodules. |
-| `gkit key add\|copy\|list` | Generate `id_<alias>`, manage the gkit-owned `~/.ssh/git_users` (OS-aware), copy a public key, list identities. |
 
 ## Quick start
 

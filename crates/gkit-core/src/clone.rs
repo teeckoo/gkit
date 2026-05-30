@@ -37,7 +37,10 @@ pub struct Opts {
 
 impl Default for Opts {
     fn default() -> Self {
-        Self { submodule_branch: true, direnv: true }
+        Self {
+            submodule_branch: true,
+            direnv: true,
+        }
     }
 }
 
@@ -93,7 +96,12 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
             args.push(dir_s.clone());
             let command = format!("git {}", args.join(" "));
 
-            let mk = |outcome| CloneReport { name: name.clone(), dir: dir.clone(), outcome, command: command.clone() };
+            let mk = |outcome| CloneReport {
+                name: name.clone(),
+                dir: dir.clone(),
+                outcome,
+                command: command.clone(),
+            };
 
             if dir.join(".git").exists() {
                 println!("+ {command}");
@@ -112,7 +120,13 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
             // 1+2: pre-clone hooks (cwd = parent of target; create it first)
             let parent = dir.parent().unwrap_or(Path::new("."));
             let _ = std::fs::create_dir_all(parent);
-            let pre: Vec<String> = conf.pre_clone.0.iter().chain(r.pre_clone.0.iter()).cloned().collect();
+            let pre: Vec<String> = conf
+                .pre_clone
+                .0
+                .iter()
+                .chain(r.pre_clone.0.iter())
+                .cloned()
+                .collect();
             if let Err(e) = run_hooks(&pre, parent, &env) {
                 println!("FAILED   {name:<28} {e}");
                 return mk(Outcome::Failed(e));
@@ -130,14 +144,23 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
 
             // 4: built-ins (captured)
             if opts.submodule_branch {
-                let _ = git.run(&dir, &["submodule", "foreach", "--recursive", SUBMODULE_SWITCH]);
+                let _ = git.run(
+                    &dir,
+                    &["submodule", "foreach", "--recursive", SUBMODULE_SWITCH],
+                );
             }
             if opts.direnv && dir.join(".envrc").exists() {
                 let _ = Command::new("direnv").arg("allow").arg(&dir).output(); // trust-only, no eval
             }
 
             // 5+6: post-clone hooks (cwd = the cloned repo)
-            let post: Vec<String> = conf.post_clone.0.iter().chain(r.post_clone.0.iter()).cloned().collect();
+            let post: Vec<String> = conf
+                .post_clone
+                .0
+                .iter()
+                .chain(r.post_clone.0.iter())
+                .cloned()
+                .collect();
             if let Err(e) = run_hooks(&post, &dir, &env) {
                 println!("FAILED   {name:<28} {e}");
                 return mk(Outcome::Failed(e));

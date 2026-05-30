@@ -96,7 +96,10 @@ pub fn evaluate_tree<G: Git + Sync>(
     repos
         .into_iter()
         .zip(slots)
-        .map(|(path, status)| Entry { path, status: status.expect("every slot filled") })
+        .map(|(path, status)| Entry {
+            path,
+            status: status.expect("every slot filled"),
+        })
         .collect()
 }
 

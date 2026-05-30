@@ -60,11 +60,18 @@ struct InitArgs {
 fn init_cmd(args: InitArgs) -> ExitCode {
     let path = PathBuf::from(&args.file);
     if path.exists() && !args.force {
-        return die(&format!("{} already exists (use --force to overwrite)", args.file));
+        return die(&format!(
+            "{} already exists (use --force to overwrite)",
+            args.file
+        ));
     }
     // Best-effort: infer host/namespace from the current repo's origin.
     let origin = SystemGit.run(Path::new("."), &["remote", "get-url", "origin"]);
-    let parts = if origin.success { conf::scp_url_parts(origin.trimmed()) } else { None };
+    let parts = if origin.success {
+        conf::scp_url_parts(origin.trimmed())
+    } else {
+        None
+    };
     let (host, ns) = match &parts {
         Some((h, n)) => (Some(h.as_str()), Some(n.as_str())),
         None => (None, None),
@@ -99,8 +106,11 @@ struct CloneArgs {
 /// Resolve paths to a sorted, de-duplicated list of conf files: a file stays
 /// as-is; a directory expands to its `*.toml`; no input means the cwd.
 fn resolve_confs(paths: &[String]) -> Vec<PathBuf> {
-    let inputs: Vec<PathBuf> =
-        if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.iter().map(PathBuf::from).collect() };
+    let inputs: Vec<PathBuf> = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths.iter().map(PathBuf::from).collect()
+    };
     let mut out: Vec<PathBuf> = Vec::new();
     for p in inputs {
         if p.is_dir() {
@@ -126,7 +136,10 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
     if confs.is_empty() {
         return die("no .toml conf files found");
     }
-    let opts = clone::Opts { submodule_branch: !args.no_submodule_branch, direnv: !args.no_direnv };
+    let opts = clone::Opts {
+        submodule_branch: !args.no_submodule_branch,
+        direnv: !args.no_direnv,
+    };
 
     let mut failed = false;
     for conf_path in &confs {
@@ -151,7 +164,10 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
         };
         // clone_all prints each step in order (commands, hooks, status).
         let reports = clone::clone_all(&SystemGit, &cfg, &opts);
-        if reports.iter().any(|r| matches!(r.outcome, clone::Outcome::Failed(_))) {
+        if reports
+            .iter()
+            .any(|r| matches!(r.outcome, clone::Outcome::Failed(_)))
+        {
             failed = true;
         }
     }
@@ -167,9 +183,13 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
 
 #[derive(Args)]
 struct LogoffArgs {
-    /// Repository path to check (defaults to the current directory).
-    #[arg(default_value = ".")]
-    path: String,
+    /// Repo path(s) to check — or, with --conf, clone conf file(s)/dir(s).
+    /// Default: the current directory (or, with --conf, its *.toml).
+    paths: Vec<String>,
+    /// Treat the args as clone confs and check every repo listed in them
+    /// (files may be in different dirs; a dir expands to its *.toml).
+    #[arg(long)]
+    conf: bool,
     /// Per-check breakdown (one fact per line, path-first, greppable).
     #[arg(short, long)]
     verbose: bool,
@@ -183,14 +203,73 @@ struct LogoffArgs {
 
 fn logoff_cmd(args: LogoffArgs) -> ExitCode {
     let git = SystemGit;
-    let root = canonical(&args.path);
-    let entries = submodules::evaluate_tree(&git, &root, args.base_branch.as_deref(), !args.no_fetch);
-    if args.verbose {
-        report::print_verbose(&entries);
+    let mut failed = false;
+
+    // Collect the repo dirs to check: either each conf's repos, or the paths as-is.
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if args.conf {
+        if args.paths.is_empty() {
+            return die(
+                "--conf needs a conf file or directory, e.g. `gkit logoff --conf repos.toml`",
+            );
+        }
+        let confs = resolve_confs(&args.paths);
+        if confs.is_empty() {
+            return die("no .toml conf files found in the given path(s)");
+        }
+        for conf_path in &confs {
+            if confs.len() > 1 {
+                println!("== {} ==", conf_path.display());
+            }
+            let cfg = match std::fs::read_to_string(conf_path)
+                .map_err(|e| e.to_string())
+                .and_then(|t| conf::parse(&t))
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("gkit: {}: {e}", conf_path.display());
+                    failed = true;
+                    continue;
+                }
+            };
+            for r in &cfg.repo {
+                dirs.push(PathBuf::from(conf::expand_path(&r.dir, |k| {
+                    std::env::var(k).ok()
+                })));
+            }
+        }
     } else {
-        report::print_default(&entries);
+        let srcs: Vec<String> = if args.paths.is_empty() {
+            vec![".".into()]
+        } else {
+            args.paths.clone()
+        };
+        dirs = srcs.iter().map(|p| canonical(p)).collect();
     }
-    if report::all_ok(&entries) { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+
+    for dir in &dirs {
+        // In conf mode each repo resolves its own base (gkit.baseBranch -> HEAD).
+        let base = if args.conf {
+            None
+        } else {
+            args.base_branch.as_deref()
+        };
+        let entries = submodules::evaluate_tree(&git, dir, base, !args.no_fetch);
+        if args.verbose {
+            report::print_verbose(&entries);
+        } else {
+            report::print_default(&entries);
+        }
+        if !report::all_ok(&entries) {
+            failed = true;
+        }
+    }
+
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 // ---------------------------------------------------------------- stmb
@@ -218,14 +297,25 @@ struct StmbArgs {
 }
 
 enum Step {
-    Switch { dir: PathBuf, base: String, feature: Option<String> },
-    Skip { dir: PathBuf, why: String },
+    Switch {
+        dir: PathBuf,
+        base: String,
+        feature: Option<String>,
+    },
+    Skip {
+        dir: PathBuf,
+        why: String,
+    },
 }
 
 fn stmb_cmd(args: StmbArgs) -> ExitCode {
     let git = SystemGit;
     let root = canonical(&args.path);
-    let repos = if args.no_recursive { vec![root.clone()] } else { submodules::repo_paths(&git, &root) };
+    let repos = if args.no_recursive {
+        vec![root.clone()]
+    } else {
+        submodules::repo_paths(&git, &root)
+    };
 
     // Resolve ONE base for the whole tree (uniform convention) — avoids mis-resolving
     // a submodule's base and treating an integration branch as a deletable feature.
@@ -240,8 +330,15 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
             let cur = config::current_branch_opt(&git, dir);
             let dirty = !checks::committed(&git, dir);
             match stmb::plan(cur.as_deref(), &base, dirty) {
-                Ok(p) => Step::Switch { dir: dir.clone(), base: p.base, feature: p.delete_feature },
-                Err(why) => Step::Skip { dir: dir.clone(), why },
+                Ok(p) => Step::Switch {
+                    dir: dir.clone(),
+                    base: p.base,
+                    feature: p.delete_feature,
+                },
+                Err(why) => Step::Skip {
+                    dir: dir.clone(),
+                    why,
+                },
             }
         })
         .collect();
@@ -250,7 +347,10 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
     for s in &steps {
         match s {
             Step::Switch { dir, base, feature } => {
-                let del = feature.as_deref().map(|f| format!(", delete '{f}'")).unwrap_or_default();
+                let del = feature
+                    .as_deref()
+                    .map(|f| format!(", delete '{f}'"))
+                    .unwrap_or_default();
                 println!("  {}  -> switch to '{base}', pull{del}", short(dir, &root));
             }
             Step::Skip { dir, why } => println!("  {}  -- skip: {why}", short(dir, &root)),
@@ -279,10 +379,20 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
     println!("--- logoff ---");
     let entries = submodules::evaluate_tree(&git, &root, None, false);
     report::print_default(&entries);
-    if failed || !report::all_ok(&entries) { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if failed || !report::all_ok(&entries) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
-fn run_stmb(git: &SystemGit, dir: &Path, base: &str, feature: Option<&str>, force: bool) -> Result<(), String> {
+fn run_stmb(
+    git: &SystemGit,
+    dir: &Path,
+    base: &str,
+    feature: Option<&str>,
+    force: bool,
+) -> Result<(), String> {
     let co = git.run(dir, &["checkout", base]);
     if !co.success {
         return Err(format!("checkout {base} failed: {}", co.stderr.trim()));
@@ -294,10 +404,15 @@ fn run_stmb(git: &SystemGit, dir: &Path, base: &str, feature: Option<&str>, forc
             if force {
                 let force_del = git.run(dir, &["branch", "-D", f]);
                 if !force_del.success {
-                    return Err(format!("force-delete '{f}' failed: {}", force_del.stderr.trim()));
+                    return Err(format!(
+                        "force-delete '{f}' failed: {}",
+                        force_del.stderr.trim()
+                    ));
                 }
             } else {
-                return Err(format!("'{f}' not fully merged into {base}; rerun with --force to delete anyway"));
+                return Err(format!(
+                    "'{f}' not fully merged into {base}; rerun with --force to delete anyway"
+                ));
             }
         }
     }
@@ -353,7 +468,10 @@ fn key_cmd(args: KeyArgs) -> ExitCode {
 }
 
 fn ssh_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".ssh")
+    // Cross-OS home: HOME (Unix/macOS) → USERPROFILE / HOMEDRIVE+HOMEPATH (Windows).
+    key::home_from_env(|k| std::env::var(k).ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ssh")
 }
 
 fn key_add(a: KeyAddArgs) -> ExitCode {
@@ -372,7 +490,11 @@ fn key_add(a: KeyAddArgs) -> ExitCode {
 
     println!("gkit key add '{}':", a.alias);
     if need_keygen {
-        println!("  ssh-keygen -t ed25519 -C {} -f {}", a.email, key_path.display());
+        println!(
+            "  ssh-keygen -t ed25519 -C {} -f {}",
+            a.email,
+            key_path.display()
+        );
     } else {
         println!("  (key {} already exists — keeping it)", key_path.display());
     }
@@ -381,10 +503,16 @@ fn key_add(a: KeyAddArgs) -> ExitCode {
         println!("      {l}");
     }
     match &new_cfg {
-        Some(_) => println!("  add `Include git_users` to {}", ssh_config.display()),
-        None => println!("  (`Include git_users` already present in {})", ssh_config.display()),
+        Some(_) => println!(
+            "  ensure `Include git_users` in {} (asks first)",
+            ssh_config.display()
+        ),
+        None => println!(
+            "  (`Include git_users` already present in {})",
+            ssh_config.display()
+        ),
     }
-    println!("  ssh-add the key");
+    println!("  ssh-add the key, then copy the public key to the clipboard");
 
     if a.dry_run {
         return ExitCode::SUCCESS;
@@ -410,20 +538,60 @@ fn key_add(a: KeyAddArgs) -> ExitCode {
     if let Err(e) = std::fs::write(&git_users, &new_gu) {
         return die(&format!("cannot write {}: {e}", git_users.display()));
     }
-    if let Some(c) = new_cfg {
-        if let Err(e) = std::fs::write(&ssh_config, c) {
-            return die(&format!("cannot write {}: {e}", ssh_config.display()));
+    // The sensitive edit is to the user's OWN ~/.ssh/config — check for the
+    // `Include git_users` line, explain why it matters, and ask before touching it.
+    match new_cfg {
+        None => println!(
+            "✓ `Include git_users` already present in {}",
+            ssh_config.display()
+        ),
+        Some(c) => {
+            println!(
+                "! {} does not `Include git_users` — without it, ssh ignores the Host",
+                ssh_config.display()
+            );
+            println!("  block(s) gkit manages in {}.", git_users.display());
+            if a.yes
+                || confirm(&format!(
+                    "Add `Include git_users` to {}?",
+                    ssh_config.display()
+                ))
+            {
+                if let Err(e) = std::fs::write(&ssh_config, c) {
+                    return die(&format!("cannot write {}: {e}", ssh_config.display()));
+                }
+                println!("  added `Include git_users`.");
+            } else {
+                println!(
+                    "  skipped — add `Include git_users` to {} yourself to activate the key.",
+                    ssh_config.display()
+                );
+            }
         }
     }
+
     let mut add = Command::new("ssh-add");
     if macos {
         add.arg("--apple-use-keychain");
     }
     let _ = add.arg(&key_path).status();
 
-    println!("done. public key (upload to your provider, or `gkit key copy {}`):", a.alias);
-    if let Ok(pubkey) = std::fs::read_to_string(key_path.with_extension("pub")) {
-        print!("{pubkey}");
+    // Copy the public key to the clipboard, ready to paste into the provider.
+    let pubfile = key_path.with_extension("pub");
+    match std::fs::read_to_string(&pubfile) {
+        Ok(pubkey) => match clipboard_copy(&pubkey) {
+            Some(tool) => {
+                println!(
+                    "done. id_{}.pub copied to clipboard ({tool}) — paste it into {}.",
+                    a.alias, a.host
+                )
+            }
+            None => {
+                println!("done. public key (upload to {}):", a.host);
+                print!("{pubkey}");
+            }
+        },
+        Err(e) => println!("done, but cannot read {}: {e}", pubfile.display()),
     }
     ExitCode::SUCCESS
 }
@@ -434,17 +602,33 @@ fn key_copy(alias: &str) -> ExitCode {
         Ok(k) => k,
         Err(e) => return die(&format!("cannot read {}: {e}", pubfile.display())),
     };
-    // pbcopy on macOS; fall back to printing if unavailable.
-    if let Ok(mut child) = Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn() {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(pubkey.as_bytes());
-        }
-        let _ = child.wait();
-        println!("copied id_{alias}.pub to clipboard");
-    } else {
-        print!("{pubkey}");
+    match clipboard_copy(&pubkey) {
+        Some(tool) => println!("copied id_{alias}.pub to clipboard ({tool})"),
+        None => print!("{pubkey}"),
     }
     ExitCode::SUCCESS
+}
+
+/// Copy `text` to the OS clipboard via the first available per-OS tool
+/// (pbcopy / clip / wl-copy|xclip|xsel). Returns the tool that succeeded, or
+/// `None` if no clipboard tool is available (caller then prints the text).
+fn clipboard_copy(text: &str) -> Option<&'static str> {
+    for (prog, pargs) in key::clipboard_candidates(std::env::consts::OS) {
+        let Ok(mut child) = Command::new(prog)
+            .args(&pargs)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        else {
+            continue;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        if child.wait().map(|s| s.success()).unwrap_or(false) {
+            return Some(prog);
+        }
+    }
+    None
 }
 
 fn key_list() -> ExitCode {
@@ -486,4 +670,41 @@ fn confirm(msg: &str) -> bool {
 fn die(msg: &str) -> ExitCode {
     eprintln!("gkit: {msg}");
     ExitCode::from(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_confs;
+    use std::fs;
+
+    // `--conf` (and `clone`) take a list of conf sources from ANY directory: an
+    // explicit file is kept as-is, a directory expands to its sorted `*.toml`
+    // (non-`.toml` ignored), and a file + a dir can be mixed.
+    #[test]
+    fn resolve_confs_keeps_files_and_expands_dirs() {
+        let base = std::env::temp_dir().join(format!("gkit-rc-{}", std::process::id()));
+        let dir = base.join("confs");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("b.toml"), "").unwrap();
+        fs::write(dir.join("a.toml"), "").unwrap();
+        fs::write(dir.join("note.txt"), "").unwrap();
+        let lone = base.join("lone.toml");
+        fs::write(&lone, "").unwrap();
+
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+
+        // a directory -> its *.toml, sorted; note.txt excluded
+        assert_eq!(
+            resolve_confs(&[s(&dir)]),
+            vec![dir.join("a.toml"), dir.join("b.toml")]
+        );
+
+        // an explicit file (from a different dir) kept as-is, mixed with a dir
+        assert_eq!(
+            resolve_confs(&[s(&lone), s(&dir)]),
+            vec![lone.clone(), dir.join("a.toml"), dir.join("b.toml")],
+        );
+
+        fs::remove_dir_all(&base).ok();
+    }
 }

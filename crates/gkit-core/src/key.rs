@@ -5,7 +5,47 @@
 //!
 //! The single convention is the **alias**: it is the ssh `Host`, and the key is
 //! `~/.ssh/id_<alias>`. gkit OWNS `git_users` and rebuilds blocks (dedup), never
-//! blind-appends. macOS blocks include `UseKeychain yes`; Linux omits it.
+//! blind-appends. macOS blocks include `UseKeychain yes`; Linux/Windows omit it.
+//!
+//! Cross-OS: the home directory and clipboard tool differ per platform —
+//! [`home_from_env`] and [`clipboard_candidates`] are the pure, testable pieces;
+//! the CLI layer wires them to the real environment and processes.
+
+use std::path::PathBuf;
+
+/// Resolve the user's home directory from an env lookup, across OSes:
+/// `HOME` (Unix/macOS) → `USERPROFILE` (Windows) → `HOMEDRIVE`+`HOMEPATH`
+/// (older Windows). Empty values are ignored. Returns `None` if none are set.
+pub fn home_from_env(get: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let nonempty = |k: &str| get(k).filter(|v| !v.is_empty());
+    if let Some(h) = nonempty("HOME") {
+        return Some(PathBuf::from(h));
+    }
+    if let Some(up) = nonempty("USERPROFILE") {
+        return Some(PathBuf::from(up));
+    }
+    if let (Some(d), Some(p)) = (nonempty("HOMEDRIVE"), nonempty("HOMEPATH")) {
+        return Some(PathBuf::from(format!("{d}{p}")));
+    }
+    None
+}
+
+/// Ordered clipboard programs to try for a target OS (pass
+/// `std::env::consts::OS`: `"macos"`, `"windows"`, else treated as Linux/Unix).
+/// Each is `(program, args)`; the CLI runs them in order and the first that
+/// spawns and accepts the public key on stdin wins (else it prints the key).
+pub fn clipboard_candidates(os: &str) -> Vec<(&'static str, Vec<&'static str>)> {
+    match os {
+        "macos" => vec![("pbcopy", vec![])],
+        "windows" => vec![("clip", vec![])],
+        // Linux/BSD: Wayland first, then X11 (xclip, then xsel).
+        _ => vec![
+            ("wl-copy", vec![]),
+            ("xclip", vec!["-selection", "clipboard"]),
+            ("xsel", vec!["--clipboard", "--input"]),
+        ],
+    }
+}
 
 /// Render the ssh `Host` block for an alias.
 pub fn host_block(alias: &str, hostname: &str, port: Option<u16>, macos: bool) -> String {
@@ -115,7 +155,11 @@ mod tests {
         let existing = "Include project_config\n\nHost acme\n  HostName old\n  IdentityFile ~/.ssh/id_acme\n\nHost other\n  HostName github.com\n";
         let new_block = host_block("acme", "github.com", None, true);
         let out = upsert_block(existing, "acme", &new_block);
-        assert_eq!(out.matches("Host acme").count(), 1, "exactly one acme block:\n{out}");
+        assert_eq!(
+            out.matches("Host acme").count(),
+            1,
+            "exactly one acme block:\n{out}"
+        );
         assert!(out.contains("HostName github.com")); // new value
         assert!(!out.contains("HostName old")); // old acme block gone
         assert!(out.contains("Host other")); // unrelated block preserved
@@ -124,16 +168,72 @@ mod tests {
 
     #[test]
     fn ensure_include_adds_only_when_missing() {
-        assert!(ensure_include("Host x\n").unwrap().starts_with("Include git_users"));
+        assert!(ensure_include("Host x\n")
+            .unwrap()
+            .starts_with("Include git_users"));
         assert_eq!(ensure_include("Include git_users\nHost x\n"), None);
+    }
+
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k: &str| m.get(k).cloned()
+    }
+
+    #[test]
+    fn home_resolves_home_then_userprofile_then_homedrive() {
+        // HOME wins (Unix/macOS).
+        assert_eq!(
+            home_from_env(env_of(&[
+                ("HOME", "/home/u"),
+                ("USERPROFILE", "C:\\Users\\u")
+            ])),
+            Some(PathBuf::from("/home/u"))
+        );
+        // Windows: no HOME → USERPROFILE.
+        assert_eq!(
+            home_from_env(env_of(&[("USERPROFILE", "C:\\Users\\u")])),
+            Some(PathBuf::from("C:\\Users\\u"))
+        );
+        // Empty HOME is ignored, falls through.
+        assert_eq!(
+            home_from_env(env_of(&[("HOME", ""), ("USERPROFILE", "C:\\Users\\u")])),
+            Some(PathBuf::from("C:\\Users\\u"))
+        );
+        // Older Windows: HOMEDRIVE + HOMEPATH.
+        assert_eq!(
+            home_from_env(env_of(&[("HOMEDRIVE", "C:"), ("HOMEPATH", "\\Users\\u")])),
+            Some(PathBuf::from("C:\\Users\\u"))
+        );
+        // Nothing set → None (CLI then falls back to ".").
+        assert_eq!(home_from_env(env_of(&[])), None);
+    }
+
+    #[test]
+    fn clipboard_candidates_are_os_specific() {
+        let names = |os| {
+            clipboard_candidates(os)
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("macos"), vec!["pbcopy"]);
+        assert_eq!(names("windows"), vec!["clip"]);
+        assert_eq!(names("linux"), vec!["wl-copy", "xclip", "xsel"]);
     }
 
     #[test]
     fn lists_hosts_with_identity() {
-        let g = "Host acme\n  IdentityFile ~/.ssh/id_acme\nHost work\n  IdentityFile ~/.ssh/id_work\n";
+        let g =
+            "Host acme\n  IdentityFile ~/.ssh/id_acme\nHost work\n  IdentityFile ~/.ssh/id_work\n";
         assert_eq!(
             list_hosts(g),
-            vec![("acme".into(), "~/.ssh/id_acme".into()), ("work".into(), "~/.ssh/id_work".into())]
+            vec![
+                ("acme".into(), "~/.ssh/id_acme".into()),
+                ("work".into(), "~/.ssh/id_work".into())
+            ]
         );
     }
 }

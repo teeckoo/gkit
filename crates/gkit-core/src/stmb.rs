@@ -22,8 +22,14 @@ pub fn plan(current: Option<&str>, base: &str, dirty: bool) -> Result<Plan, Stri
     }
     match current {
         None => Err("detached HEAD — checkout a branch before stmb".into()),
-        Some(cur) if cur == base => Ok(Plan { base: base.to_string(), delete_feature: None }),
-        Some(cur) => Ok(Plan { base: base.to_string(), delete_feature: Some(cur.to_string()) }),
+        Some(cur) if cur == base => Ok(Plan {
+            base: base.to_string(),
+            delete_feature: None,
+        }),
+        Some(cur) => Ok(Plan {
+            base: base.to_string(),
+            delete_feature: Some(cur.to_string()),
+        }),
     }
 }
 
@@ -33,7 +39,9 @@ mod tests {
 
     #[test]
     fn refuses_dirty_tree() {
-        assert!(plan(Some("feat"), "dev", true).unwrap_err().contains("uncommitted"));
+        assert!(plan(Some("feat"), "dev", true)
+            .unwrap_err()
+            .contains("uncommitted"));
     }
 
     #[test]
@@ -43,14 +51,23 @@ mod tests {
 
     #[test]
     fn on_base_deletes_nothing() {
-        assert_eq!(plan(Some("dev"), "dev", false).unwrap(), Plan { base: "dev".into(), delete_feature: None });
+        assert_eq!(
+            plan(Some("dev"), "dev", false).unwrap(),
+            Plan {
+                base: "dev".into(),
+                delete_feature: None
+            }
+        );
     }
 
     #[test]
     fn on_feature_deletes_it() {
         assert_eq!(
             plan(Some("feat-x"), "dev", false).unwrap(),
-            Plan { base: "dev".into(), delete_feature: Some("feat-x".into()) }
+            Plan {
+                base: "dev".into(),
+                delete_feature: Some("feat-x".into())
+            }
         );
     }
 }
