@@ -6,7 +6,7 @@ for `gkit key`).
 ## Homebrew (macOS / Linux)
 
 ```sh
-brew install teeckoo/homebrew-tap/gkit
+brew install teeckoo/tap/gkit
 ```
 
 ## winget (Windows)

@@ -27,7 +27,7 @@ branch — all explicit, all printed, no hidden state.
 
 ```sh
 # Homebrew (macOS / Linux)
-brew install teeckoo/homebrew-tap/gkit
+brew install teeckoo/tap/gkit
 
 # winget (Windows)
 winget install teeckoo.gkit
