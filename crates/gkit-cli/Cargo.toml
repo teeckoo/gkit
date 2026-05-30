@@ -6,6 +6,8 @@ license.workspace = true
 repository.workspace = true
 homepage = "https://github.com/teeckoo/gkit"
 description = "gkit — a transparent git/ssh toolkit: ssh keys, hooked clone, log-off check, stmb"
+keywords = ["git", "ssh", "cli", "submodule", "devtools"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "gkit"
@@ -13,4 +15,5 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-gkit-core = { path = "../gkit-core" }
+# version is REQUIRED so `cargo publish` can resolve gkit-core from crates.io
+gkit-core = { path = "../gkit-core", version = "0.1.0" }

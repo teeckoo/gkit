@@ -3,7 +3,10 @@ name = "gkit-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Core library for the gkit toolkit (git shell-out, log-off checks, submodule recursion)"
+keywords = ["git", "submodule", "devtools"]
+categories = ["development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
