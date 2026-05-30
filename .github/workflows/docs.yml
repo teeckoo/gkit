@@ -1,7 +1,7 @@
 # Build the mdbook site and deploy it to GitHub Pages.
-# The configure-pages step (enablement: true) turns Pages on automatically on the
-# first run. If org/repo policy blocks that, enable it once manually:
-# Settings → Pages → Build and deployment → Source: GitHub Actions.
+# ONE-TIME SETUP (required): repo → Settings → Pages → Build and deployment →
+# Source: "GitHub Actions". (Programmatic enablement isn't permitted for this repo,
+# so it must be turned on in the UI once; then this workflow deploys on every push.)
 name: docs
 on:
   push:
@@ -31,10 +31,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -LsSf \
             https://github.com/rust-lang/mdBook/releases/download/v0.5.2/mdbook-v0.5.2-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C /usr/local/bin
-      - name: Configure Pages (enables it on first run)
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
+      - uses: actions/configure-pages@v5
       - run: mdbook build docs
       - uses: actions/upload-pages-artifact@v3
         with:
