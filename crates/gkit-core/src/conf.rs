@@ -175,11 +175,15 @@ pub fn template(host: Option<&str>, namespace: Option<&str>) -> String {
 host      = "{host}"        # ssh Host alias (~/.ssh/config); URL = host:namespace/repo.git
 namespace = "{namespace}"   # GitHub org / GitLab group / user
 
-# Optional global settings (uncomment as needed):
+# `gkit.baseBranch` = this repo's integration branch. `gkit logoff` and `gkit stmb`
+# read it as the "base": the branch stmb returns to, and the one logoff flags you
+# for sitting on while feature branches exist. Stamped on every cloned repo here:
+post-clone = ["git config gkit.baseBranch main"]   # change to your convention: master / dev
+
+# More optional global settings (uncomment as needed):
 # git-flags   = ["-c", "http.lowSpeedLimit=1000"]   # raw flags BEFORE `clone`
 # clone-flags = ["--filter=blob:none"]              # raw flags AFTER `clone`
 # pre-clone   = "echo cloning $GKIT_REPO"
-# post-clone  = ["direnv allow ."]
 
 # One [[repo]] block per repo (name = basename of dir; $VAR/~ expanded):
 [[repo]]
@@ -280,6 +284,7 @@ post-clone = ["mill compile", "echo done"]
         assert!(filled.contains("host      = \"tlbb\""));
         assert!(filled.contains("namespace = \"codogenics\""));
         assert!(filled.contains("[[repo]]"));
+        assert!(filled.contains(r#"post-clone = ["git config gkit.baseBranch main"]"#));
         let blank = template(None, None);
         assert!(blank.contains("<ssh-host-alias>") && blank.contains("<namespace>"));
         // the template must itself be valid TOML that parses

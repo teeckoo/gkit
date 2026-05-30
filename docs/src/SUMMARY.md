@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](./introduction.md)
+[Why gkit (and what we tried)](./why-gkit.md)
 
 - [Installation](./installation.md)
 - [Quick start](./quick-start.md)
