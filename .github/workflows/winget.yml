@@ -1,0 +1,28 @@
+# Publish gkit to winget (the Windows Package Manager) on each GitHub release.
+#
+# cargo-dist has no native winget support, so this uses winget-releaser, which
+# submits a manifest PR to microsoft/winget-pkgs referencing the Windows artifact
+# that the `release` workflow (cargo-dist) attaches to the GitHub Release.
+#
+# Prerequisites (one-time):
+#   1. A classic PAT (scope: public_repo) stored as the `WINGET_TOKEN` secret —
+#      used to fork/PR microsoft/winget-pkgs.
+#   2. Reserve/own the package identifier `teeckoo.gkit`.
+#   3. The artifact is cargo-dist's `gkit-x86_64-pc-windows-msvc.zip` (a portable
+#      package). If winget's zip-portable manifest proves fiddly, switch cargo-dist
+#      to an `msi` installer instead and point the regex at the .msi.
+name: winget
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: teeckoo.gkit
+          installers-regex: 'x86_64-pc-windows-msvc\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

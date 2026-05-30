@@ -1,0 +1,11 @@
+[book]
+title = "gkit"
+description = "A transparent, stateless git/ssh toolkit."
+authors = ["teeckoo"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+git-repository-url = "https://github.com/teeckoo/gkit"
+edit-url-template = "https://github.com/teeckoo/gkit/edit/main/docs/{path}"

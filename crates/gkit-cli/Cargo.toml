@@ -1,0 +1,16 @@
+[package]
+name = "gkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/teeckoo/gkit"
+description = "gkit — a transparent git/ssh toolkit: ssh keys, hooked clone, log-off check, stmb"
+
+[[bin]]
+name = "gkit"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+gkit-core = { path = "../gkit-core" }

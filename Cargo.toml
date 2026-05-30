@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/gkit-core", "crates/gkit-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/teeckoo/gkit"
+
+[profile.release]
+strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

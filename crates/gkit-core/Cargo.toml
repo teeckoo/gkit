@@ -1,0 +1,10 @@
+[package]
+name = "gkit-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core library for the gkit toolkit (git shell-out, log-off checks, submodule recursion)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
