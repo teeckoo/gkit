@@ -107,7 +107,10 @@ pub mod test_support {
     impl Git for FakeGit {
         fn run(&self, dir: &Path, args: &[&str]) -> GitOutput {
             let joined = args.join(" ");
-            let dir_key = format!("{}\u{0}{}", dir.display(), joined);
+            // Normalize separators to `/` so directory-scoped keys (always written
+            // with `/` in tests) match on Windows too, where `Path::join` yields `\`.
+            let dir_disp = dir.display().to_string().replace('\\', "/");
+            let dir_key = format!("{dir_disp}\u{0}{joined}");
             // Prefer a directory-scoped response, else fall back to an args-only one.
             self.responses
                 .get(&dir_key)
@@ -115,10 +118,7 @@ pub mod test_support {
                 .cloned()
                 .unwrap_or(GitOutput {
                     stdout: String::new(),
-                    stderr: format!(
-                        "FakeGit: no response for `git {joined}` in {}",
-                        dir.display()
-                    ),
+                    stderr: format!("FakeGit: no response for `git {joined}` in {dir_disp}"),
                     success: false,
                 })
         }

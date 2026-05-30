@@ -117,7 +117,11 @@ mod tests {
             .ok_in("/r/b", "submodule status", " sha c (x)")
             .ok_in("/r/b/c", "submodule status", "");
         let order = collect_repos(&git, Path::new("/r"));
-        let got: Vec<String> = order.iter().map(|p| p.display().to_string()).collect();
+        // Normalize separators: `Path::join` yields `\` on Windows, `/` elsewhere.
+        let got: Vec<String> = order
+            .iter()
+            .map(|p| p.display().to_string().replace('\\', "/"))
+            .collect();
         assert_eq!(got, vec!["/r/a", "/r/b/c", "/r/b", "/r"]);
     }
 
@@ -125,7 +129,10 @@ mod tests {
     fn skips_uninitialized_submodules() {
         let git = FakeGit::new().ok_in("/r", "submodule status", "-sha a (x)\n sha b (x)\n");
         let subs = direct_submodules(&git, Path::new("/r"));
-        let got: Vec<String> = subs.iter().map(|p| p.display().to_string()).collect();
+        let got: Vec<String> = subs
+            .iter()
+            .map(|p| p.display().to_string().replace('\\', "/"))
+            .collect();
         assert_eq!(got, vec!["/r/b"]); // 'a' (uninitialized, '-') skipped
     }
 }
