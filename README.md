@@ -52,7 +52,7 @@ cargo install --git https://github.com/teeckoo/gkit gkit
 | Command | What it does |
 |---|---|
 | `gkit init [file]` | Scaffold a starter clone conf in the cwd (`host`/`namespace` inferred from `origin` when possible). |
-| `gkit clone [paths…]` | Clone repos from conf file(s) or a directory (default: every `*.toml` in the cwd); submodules switched onto their branch, `.envrc` trusted, every command printed. |
+| `gkit clone <conf…>` | Clone repos from the given conf file(s) (`repos.toml`, or `*.toml` for a whole dir — a directory arg isn't accepted); submodules switched onto their branch, `.envrc` trusted, every command printed. |
 | `gkit logoff [path…]` | Is every repo **+ submodule** committed and pushed? Exit 0 = all clear. `--verbose` for a greppable per-check breakdown; **`--conf <conf…>`** to check every repo in your clone conf(s). |
 | `gkit stmb [path]` | "Switch to main branch": return to the base branch, update it, and **safe-delete** the finished feature branch — recursively across submodules. |
 
@@ -87,7 +87,7 @@ name = "cosp"                                 #   remote repo `cosp` -> dir `cos
 
 ```sh
 gkit clone repos.toml        # clones missing repos (prints each git command)
-# or `gkit clone` (every *.toml in the cwd) / `gkit clone confs/` (a whole dir)
+# or `gkit clone *.toml` (every conf in the cwd, via shell glob)
 gkit logoff ~/work           # gate: everything committed & pushed? (recurses submodules)
 gkit stmb  ~/work/cp-conf    # done with a feature -> back to base, delete it, verify
 ```

@@ -7,21 +7,23 @@ command is printed (transparency); all subprocess output is captured so a noisy
 ## Synopsis
 
 ```sh
-gkit clone [paths…] [--no-submodule-branch] [--no-direnv]
+gkit clone <conf…> [--no-submodule-branch] [--no-direnv]
 ```
 
-`paths` are conf files and/or directories:
+`conf…` are **explicit conf file(s)** — at least one is required, and a directory
+is not accepted (use a shell glob for "every conf here"):
 
 ```sh
-gkit clone                       # no arg  -> every *.toml in the current dir
-gkit clone confs/                # a dir   -> every *.toml inside it
 gkit clone codogenics.toml acme.toml   # explicit list
+gkit clone *.toml                      # every conf in the cwd (shell glob)
+gkit clone confs/*.toml                # every conf in confs/ (shell glob)
 ```
 
-Each conf has its own `host`/`namespace`, so multiple per-namespace confs in one
-directory are processed in turn (sorted, with a `== <conf> ==` header). A conf that
-fails to parse is reported and skipped; the rest still run and the exit code is
-non-zero if anything failed.
+`gkit clone` with no file — or with a directory like `gkit clone confs/` — is an
+error. This matches how [`logoff --conf`](./logoff.md) takes confs. When several
+confs are given they're processed in turn (with a `== <conf> ==` header); each has
+its own `host`/`namespace`. A conf that fails to parse is reported and skipped; the
+rest still run and the exit code is non-zero if anything failed.
 
 ## What it does, per repo
 

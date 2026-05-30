@@ -26,8 +26,8 @@ branch = "dev"                # single branch
 
 ```sh
 gkit clone repos.toml        # one conf
-gkit clone                   # or: every *.toml in the current dir
-gkit clone confs/            # or: every *.toml in a directory
+gkit clone a.toml b.toml     # or: several confs
+gkit clone *.toml            # or: every conf in the cwd (shell glob)
 ```
 
 gkit prints the exact command for each repo, clones missing ones, switches their

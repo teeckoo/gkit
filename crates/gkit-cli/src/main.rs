@@ -92,8 +92,8 @@ fn init_cmd(args: InitArgs) -> ExitCode {
 
 #[derive(Args)]
 struct CloneArgs {
-    /// Conf files and/or directories. A directory means every `*.toml` in it.
-    /// Default: every `*.toml` in the current directory.
+    /// Conf file(s) to clone from (e.g. `repos.toml` or `*.toml`). At least one is
+    /// required; a directory is not accepted — use a shell glob like `confs/*.toml`.
     paths: Vec<String>,
     /// Don't switch submodules onto their .gitmodules branch (leave detached).
     #[arg(long)]
@@ -103,39 +103,34 @@ struct CloneArgs {
     no_direnv: bool,
 }
 
-/// Resolve paths to a sorted, de-duplicated list of conf files: a file stays
-/// as-is; a directory expands to its `*.toml`; no input means the cwd.
-fn resolve_confs(paths: &[String]) -> Vec<PathBuf> {
-    let inputs: Vec<PathBuf> = if paths.is_empty() {
-        vec![PathBuf::from(".")]
-    } else {
-        paths.iter().map(PathBuf::from).collect()
-    };
+/// Resolve explicit conf-file arguments to a de-duplicated list. At least one is
+/// required, and each must be a file — a directory is rejected; use a shell glob
+/// like `*.toml` for "every conf here". Shared by `clone` and `logoff --conf` so
+/// both accept conf paths identically.
+fn resolve_confs(paths: &[String]) -> Result<Vec<PathBuf>, String> {
+    if paths.is_empty() {
+        return Err("need at least one conf file, e.g. `repos.toml` or `*.toml`".into());
+    }
     let mut out: Vec<PathBuf> = Vec::new();
-    for p in inputs {
-        if p.is_dir() {
-            if let Ok(rd) = std::fs::read_dir(&p) {
-                let mut tomls: Vec<PathBuf> = rd
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|f| f.is_file() && f.extension().is_some_and(|x| x == "toml"))
-                    .collect();
-                tomls.sort();
-                out.extend(tomls);
-            }
-        } else {
-            out.push(p);
+    for p in paths {
+        let pb = PathBuf::from(p);
+        if pb.is_dir() {
+            return Err(format!(
+                "`{p}` is a directory — pass conf file(s), e.g. `{}/*.toml`",
+                p.trim_end_matches('/')
+            ));
         }
+        out.push(pb);
     }
     out.dedup();
-    out
+    Ok(out)
 }
 
 fn clone_cmd(args: CloneArgs) -> ExitCode {
-    let confs = resolve_confs(&args.paths);
-    if confs.is_empty() {
-        return die("no .toml conf files found");
-    }
+    let confs = match resolve_confs(&args.paths) {
+        Ok(c) => c,
+        Err(e) => return die(&e),
+    };
     let opts = clone::Opts {
         submodule_branch: !args.no_submodule_branch,
         direnv: !args.no_direnv,
@@ -183,11 +178,12 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
 
 #[derive(Args)]
 struct LogoffArgs {
-    /// Repo path(s) to check — or, with --conf, clone conf file(s)/dir(s).
-    /// Default: the current directory (or, with --conf, its *.toml).
+    /// Repo path(s) to check (default: the current directory) — or, with --conf,
+    /// the clone conf file(s) to read.
     paths: Vec<String>,
-    /// Treat the args as clone confs and check every repo listed in them
-    /// (files may be in different dirs; a dir expands to its *.toml).
+    /// Treat the args as clone confs and check every repo listed in them. Takes
+    /// explicit conf file(s) (e.g. `*.toml`), from any dir; a directory is not
+    /// accepted.
     #[arg(long)]
     conf: bool,
     /// Per-check breakdown (one fact per line, path-first, greppable).
@@ -208,15 +204,10 @@ fn logoff_cmd(args: LogoffArgs) -> ExitCode {
     // Collect the repo dirs to check: either each conf's repos, or the paths as-is.
     let mut dirs: Vec<PathBuf> = Vec::new();
     if args.conf {
-        if args.paths.is_empty() {
-            return die(
-                "--conf needs a conf file or directory, e.g. `gkit logoff --conf repos.toml`",
-            );
-        }
-        let confs = resolve_confs(&args.paths);
-        if confs.is_empty() {
-            return die("no .toml conf files found in the given path(s)");
-        }
+        let confs = match resolve_confs(&args.paths) {
+            Ok(c) => c,
+            Err(e) => return die(&e),
+        };
         for conf_path in &confs {
             if confs.len() > 1 {
                 println!("== {} ==", conf_path.display());
@@ -368,6 +359,7 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
     let mut failed = false;
     for s in &steps {
         if let Step::Switch { dir, base, feature } = s {
+            println!("{}:", short(dir, &root));
             if let Err(e) = run_stmb(&git, dir, base, feature.as_deref(), args.force) {
                 eprintln!("gkit stmb: {}: {e}", short(dir, &root));
                 failed = true;
@@ -376,7 +368,7 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
     }
 
     // Verify with a (recursive) log-off check on the root.
-    println!("--- logoff ---");
+    println!("\n--- logoff ---");
     let entries = submodules::evaluate_tree(&git, &root, None, false);
     report::print_default(&entries);
     if failed || !report::all_ok(&entries) {
@@ -393,16 +385,21 @@ fn run_stmb(
     feature: Option<&str>,
     force: bool,
 ) -> Result<(), String> {
-    let co = git.run(dir, &["checkout", base]);
+    // Print each git command before running it (transparency, like `clone`).
+    let run = |args: &[&str]| {
+        println!("  + git {}", args.join(" "));
+        git.run(dir, args)
+    };
+    let co = run(&["checkout", base]);
     if !co.success {
         return Err(format!("checkout {base} failed: {}", co.stderr.trim()));
     }
-    let _ = git.run(dir, &["pull", "--rebase", "origin", base]);
+    let _ = run(&["pull", "--rebase", "origin", base]);
     if let Some(f) = feature {
-        let del = git.run(dir, &["branch", "-d", f]);
+        let del = run(&["branch", "-d", f]);
         if !del.success {
             if force {
-                let force_del = git.run(dir, &["branch", "-D", f]);
+                let force_del = run(&["branch", "-D", f]);
                 if !force_del.success {
                     return Err(format!(
                         "force-delete '{f}' failed: {}",
@@ -416,7 +413,7 @@ fn run_stmb(
             }
         }
     }
-    let _ = git.run(dir, &["remote", "prune", "origin"]);
+    let _ = run(&["remote", "prune", "origin"]);
     Ok(())
 }
 
@@ -678,40 +675,39 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    // `--conf` (and `clone`) take a list of conf sources from ANY directory: an
-    // explicit file is kept as-is, a directory expands to its sorted `*.toml`
-    // (non-`.toml` ignored), and a file + a dir can be mixed.
+    // `clone` and `logoff --conf` accept ONLY explicit conf file(s): at least one
+    // is required, a directory is rejected (use a `*.toml` shell glob instead), and
+    // explicit files are kept in order, deduped.
     //
-    // We assert on the resolved file *names* (and order), not full PathBufs: the
-    // selection/sort/exclusion logic is what matters, and name comparison is robust
-    // to OS path normalization (Windows verbatim/short-name prefixes, separators).
+    // Assertions compare Ok/Err and file *names* (not full PathBufs), which is
+    // robust to OS path normalization (Windows verbatim/short-name prefixes).
     #[test]
-    fn resolve_confs_keeps_files_and_expands_dirs() {
+    fn resolve_confs_requires_explicit_files() {
         let base = std::env::temp_dir().join(format!("gkit-rc-{}", std::process::id()));
-        let dir = base.join("confs");
         let _ = fs::remove_dir_all(&base); // clear any stale leftovers from a prior run
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("b.toml"), "").unwrap();
-        fs::write(dir.join("a.toml"), "").unwrap();
-        fs::write(dir.join("note.txt"), "").unwrap();
-        let lone = base.join("lone.toml");
-        fs::write(&lone, "").unwrap();
+        fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.toml");
+        let b = base.join("b.toml");
+        fs::write(&a, "").unwrap();
+        fs::write(&b, "").unwrap();
 
         let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
-        let names = |v: Vec<PathBuf>| {
-            v.iter()
+        let names = |r: Result<Vec<PathBuf>, String>| {
+            r.unwrap()
+                .iter()
                 .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
         };
 
-        // a directory -> its *.toml, sorted; note.txt excluded
-        assert_eq!(names(resolve_confs(&[s(&dir)])), ["a.toml", "b.toml"]);
+        // no args -> error (no cwd default)
+        assert!(resolve_confs(&[]).is_err());
 
-        // an explicit file (from a different dir) kept as-is, mixed with a dir
-        assert_eq!(
-            names(resolve_confs(&[s(&lone), s(&dir)])),
-            ["lone.toml", "a.toml", "b.toml"]
-        );
+        // a directory -> error (no expansion)
+        assert!(resolve_confs(&[s(&base)]).is_err());
+
+        // explicit files -> kept in order, deduped
+        assert_eq!(names(resolve_confs(&[s(&a), s(&b)])), ["a.toml", "b.toml"]);
+        assert_eq!(names(resolve_confs(&[s(&a), s(&a)])), ["a.toml"]);
 
         let _ = fs::remove_dir_all(&base);
     }

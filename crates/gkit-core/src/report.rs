@@ -5,9 +5,12 @@
 use crate::submodules::Entry;
 
 /// Default: one line per repo — `<abs-path> <branch> true|false` (zsh-compatible).
+/// For an unusable path the reason sits where the branch would be, so the line
+/// still ends in `false` and stays greppable.
 pub fn print_default(entries: &[Entry]) {
     for e in entries {
-        println!("{} {} {}", e.path.display(), e.status.branch, e.status.ok());
+        let middle = e.status.problem.as_deref().unwrap_or(&e.status.branch);
+        println!("{} {} {}", e.path.display(), middle, e.status.ok());
     }
 }
 
@@ -17,6 +20,10 @@ pub fn print_verbose(entries: &[Entry]) {
     for e in entries {
         let p = e.path.display();
         let s = &e.status;
+        if let Some(reason) = &s.problem {
+            println!("{p}\tRESULT\t{reason}\tfalse");
+            continue;
+        }
         println!("{p}\tcommitted\t{}", s.committed);
         println!("{p}\tall-commits-pushed\t{}", s.all_commits_pushed);
         println!("{p}\tbranches-have-remote\t{}", s.branches_have_remote);

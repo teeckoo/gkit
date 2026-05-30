@@ -14,9 +14,9 @@ gkit logoff --conf <conf…>      # check every repo listed in the conf(s)
 - `gkit logoff` — the repo at the current directory.
 - `gkit logoff <path>…` — those repo(s) + their submodules.
 - `gkit logoff --conf <conf…>` — **fleet mode**: check every repo listed in the
-  given clone conf(s). Conf args are required (a bare `--conf` errors); they may be
-  files from **different directories** and/or dirs (each expands to its `*.toml`).
-  Use a glob for "all in here":
+  given clone conf(s). Takes **explicit conf file(s)** (required — a bare `--conf`
+  errors, and a directory is not accepted); files may be from **different
+  directories**. Use a shell glob for "all in here" (same rule as `gkit clone`):
 
 ```sh
 gkit logoff --conf *.toml                 # every repo in the cwd's confs
@@ -57,6 +57,18 @@ Default (one line per repo, post-order: submodules before their parent):
 ```
 
 Greppable: `gkit logoff -v | grep -w false`, `… | awk -F'\t' '$NF=="false"'`.
+
+A path that **isn't a git repository** (or doesn't exist) **fails the gate** rather
+than passing — the reason is shown where the branch would be, so the line still
+ends in `false` and the exit code is non-zero:
+
+```text
+/path/not-a-repo   not a git repository   false
+/path/missing      no such directory      false
+```
+
+(Without this, a non-repo would pass every check vacuously: an empty `git status`
+reads as "nothing pending".)
 
 ## Flags
 

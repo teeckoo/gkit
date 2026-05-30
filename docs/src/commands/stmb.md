@@ -20,9 +20,11 @@ gkit stmb [path] [--base <b>] [--no-recursive] [--force] [-y|--yes] [--dry-run]
    - already on base → switch/pull only;
    - dirty working tree or detached HEAD → **skip** (reported).
 3. Print the plan. With `--dry-run`, stop here. Otherwise confirm (skip with `-y`).
-4. Execute: `checkout base` → `pull --rebase origin base` → delete feature →
+4. Execute, **printing each git command** under a per-repo header (transparency,
+   like `clone`): `checkout base` → `pull --rebase origin base` → delete feature →
    `remote prune origin`.
-5. Run `logoff` to confirm everything is clean.
+5. Automatically run `logoff` (recursive) to confirm everything is clean — after a
+   blank line.
 
 ## Safe deletion
 
@@ -43,9 +45,17 @@ unmerged branch** — so you can't silently lose unpushed work. Pass `--force` t
 ## Example
 
 ```text
-$ gkit stmb --base dev --dry-run ~/work/cp-conf
-stmb plan (3 repo(s)):
-  submodule-a  -> switch to 'dev', pull, delete 'feat-x'
-  submodule-b  -> switch to 'dev', pull
-  .            -> switch to 'dev', pull, delete 'feat-x'
+$ gkit stmb --base dev --yes ~/work/repo
+stmb plan (1 repo(s)):
+  .  -> switch to 'dev', pull, delete 'feat-x'
+.:
+  + git checkout dev
+  + git pull --rebase origin dev
+  + git branch -d feat-x
+  + git remote prune origin
+
+--- logoff ---
+/home/you/work/repo  dev  true
 ```
+
+`--dry-run` prints just the plan (the first block) and stops.

@@ -43,6 +43,13 @@ pub fn repo_paths(git: &dyn Git, root: &Path) -> Vec<PathBuf> {
     collect_repos(git, root)
 }
 
+/// Is `dir` inside a git work tree? (`git rev-parse --is-inside-work-tree`
+/// prints `true` and exits 0). False for a missing dir or a plain directory.
+fn is_work_tree(git: &dyn Git, dir: &Path) -> bool {
+    let r = git.run(dir, &["rev-parse", "--is-inside-work-tree"]);
+    r.success && r.trimmed() == "true"
+}
+
 fn collect_repos(git: &dyn Git, root: &Path) -> Vec<PathBuf> {
     fn visit(git: &dyn Git, dir: &Path, order: &mut Vec<PathBuf>) {
         for sub in direct_submodules(git, dir) {
@@ -67,6 +74,20 @@ pub fn evaluate_tree<G: Git + Sync>(
     base_override: Option<&str>,
     fetch: bool,
 ) -> Vec<Entry> {
+    // Guard the root: a non-repo (or missing) dir would otherwise pass every check
+    // vacuously. Only the root needs this — submodules come from a real repo's
+    // `git submodule status`, so they're already work trees.
+    if !is_work_tree(git, root) {
+        let reason = if root.exists() {
+            "not a git repository"
+        } else {
+            "no such directory"
+        };
+        return vec![Entry {
+            path: root.to_path_buf(),
+            status: RepoStatus::unusable(reason),
+        }];
+    }
     let repos = collect_repos(git, root);
     let last = repos.len().saturating_sub(1);
     let mut slots: Vec<Option<RepoStatus>> = (0..repos.len()).map(|_| None).collect();
@@ -123,6 +144,17 @@ mod tests {
             .map(|p| p.display().to_string().replace('\\', "/"))
             .collect();
         assert_eq!(got, vec!["/r/a", "/r/b/c", "/r/b", "/r"]);
+    }
+
+    #[test]
+    fn non_repo_root_is_flagged_not_passed() {
+        // A root that isn't a work tree (rev-parse fails) must yield ONE entry that
+        // fails the gate — not a vacuous pass.
+        let git = FakeGit::new().fail("rev-parse --is-inside-work-tree");
+        let entries = evaluate_tree(&git, Path::new("/not/a/repo"), None, false);
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].status.ok());
+        assert!(entries[0].status.problem.is_some());
     }
 
     #[test]

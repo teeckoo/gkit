@@ -114,12 +114,32 @@ pub struct RepoStatus {
     pub branches_have_remote: bool,
     pub not_behind_remote: bool,
     pub correct_branch: bool,
+    /// Set when the path couldn't be checked at all (missing dir / not a git
+    /// repo). When present, the gate FAILS and `problem` is shown in place of the
+    /// checks — otherwise a non-repo would pass every check vacuously (empty git
+    /// output reads as "nothing pending").
+    pub problem: Option<String>,
 }
 
 impl RepoStatus {
-    /// True only if every check passed.
+    /// A path that couldn't be checked (missing dir / not a git repo). Fails the
+    /// gate; `reason` is rendered in place of the per-check results.
+    pub fn unusable(reason: impl Into<String>) -> Self {
+        RepoStatus {
+            branch: String::new(),
+            committed: false,
+            all_commits_pushed: false,
+            branches_have_remote: false,
+            not_behind_remote: false,
+            correct_branch: false,
+            problem: Some(reason.into()),
+        }
+    }
+
+    /// True only if the repo was checkable AND every check passed.
     pub fn ok(&self) -> bool {
-        self.committed
+        self.problem.is_none()
+            && self.committed
             && self.all_commits_pushed
             && self.branches_have_remote
             && self.not_behind_remote
@@ -136,6 +156,7 @@ pub fn evaluate(git: &dyn Git, dir: &Path, base_branch: &str) -> RepoStatus {
         branches_have_remote: branches_have_remote(git, dir),
         not_behind_remote: not_behind_remote(git, dir),
         correct_branch: correct_branch(git, dir, base_branch),
+        problem: None,
     }
 }
 
