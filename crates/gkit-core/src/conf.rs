@@ -2,9 +2,9 @@
 //!
 //! ```toml
 //! host      = "tlbb"
-//! namespace = "codogenics"   # GitHub org / GitLab group / user; URL = host:namespace/repo.git
+//! namespace = "example-org"   # GitHub org / GitLab group / user; URL = host:namespace/repo.git
 //!
-//! # global (all optional)
+//! # global (all optional; `namespace` too — a repo may set its own instead)
 //! git-flags   = ["-c", "http.lowSpeedLimit=1000"]   # raw, BEFORE `clone`
 //! clone-flags = ["--filter=blob:none"]              # raw, AFTER `clone`
 //! pre-clone   = "echo starting $GKIT_REPO"           # string OR list of strings
@@ -15,15 +15,17 @@
 //!
 //! [[repo]]
 //! dir         = "$CP_COMMON_LIBS/cosp"
+//! namespace   = "other-org"   # overrides the global namespace for THIS repo
 //! depth       = 1
 //! branch      = "dev"
 //! clone-flags = ["--no-tags"]
 //! post-clone  = ["mill compile"]
 //! ```
 //!
-//! `host`/`namespace` live in the file (not the filename) → one ssh key can back
-//! many per-namespace confs. gkit keeps no global state: this file + each repo's
-//! own metadata are the state.
+//! `host` (and optionally `namespace`) live in the file (not the filename) → one
+//! ssh key can back many confs. A repo's effective namespace is its own
+//! `namespace`, else the global one; at least one must be present. gkit keeps no
+//! global state: this file + each repo's own metadata are the state.
 
 use serde::Deserialize;
 
@@ -31,7 +33,10 @@ use serde::Deserialize;
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct CloneConf {
     pub host: String,
-    pub namespace: String,
+    /// Global namespace (org/group/user). Optional — a repo may set its own; every
+    /// repo must resolve one (see [`CloneConf::validate`]).
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Raw flags applied BEFORE `clone` (git-level, e.g. `-c k=v`).
     #[serde(default)]
     pub git_flags: Vec<String>,
@@ -53,6 +58,10 @@ pub struct CloneConf {
 pub struct Repo {
     /// Local destination dir (raw; `$VAR`/`~` expanded at clone time).
     pub dir: String,
+    /// Per-repo namespace (org/group/user) — overrides the global `namespace` for
+    /// this repo. One of repo/global namespace must be set.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Remote repo name (the URL's last segment). Defaults to `basename(dir)`; set
     /// this to clone a repo into a differently-named local directory.
     #[serde(default)]
@@ -68,6 +77,33 @@ pub struct Repo {
     pub pre_clone: Hooks,
     #[serde(default)]
     pub post_clone: Hooks,
+}
+
+impl CloneConf {
+    /// Effective namespace for a repo: its own `namespace`, else the global one.
+    pub fn namespace_for<'a>(&'a self, repo: &'a Repo) -> Option<&'a str> {
+        repo.namespace.as_deref().or(self.namespace.as_deref())
+    }
+
+    /// Every repo must resolve a namespace (per-repo or global). Returns an error
+    /// naming the offending dir(s) — call before cloning so nothing runs when a
+    /// namespace is missing.
+    pub fn validate(&self) -> Result<(), String> {
+        let missing: Vec<&str> = self
+            .repo
+            .iter()
+            .filter(|r| self.namespace_for(r).is_none())
+            .map(|r| r.dir.as_str())
+            .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "no namespace for {} — set a global `namespace` or a per-repo `namespace`",
+                missing.join(", ")
+            ))
+        }
+    }
 }
 
 impl Repo {
@@ -178,7 +214,7 @@ pub fn template(host: Option<&str>, namespace: Option<&str>) -> String {
     format!(
         r#"# gkit clone config — run `gkit clone <this-file>`.
 host      = "{host}"        # ssh Host alias (~/.ssh/config); URL = host:namespace/repo.git
-namespace = "{namespace}"   # GitHub org / GitLab group / user
+namespace = "{namespace}"   # GitHub org / GitLab group / user (optional — a repo may set its own)
 
 # `gkit.baseBranch` = this repo's integration branch. `gkit logoff` and `gkit stmb`
 # read it as the "base": the branch stmb returns to, and the one logoff flags you
@@ -193,6 +229,8 @@ post-clone = ["git config gkit.baseBranch main"]   # change to your convention: 
 # One [[repo]] block per repo (name = basename of dir; $VAR/~ expanded):
 [[repo]]
 dir = "$HOME/work/example"
+# namespace   = "other-org"   # override the global namespace for THIS repo
+# name        = "example"     # remote repo name if it differs from the dir basename
 # depth       = 1
 # branch      = "dev"
 # clone-flags = ["--no-tags"]
@@ -217,11 +255,11 @@ mod tests {
     #[test]
     fn parses_minimal_toml() {
         let c = parse(
-            "host = \"tlbb\"\nnamespace = \"codogenics\"\n[[repo]]\ndir = \"$CP_HOME/cp-conf\"\n",
+            "host = \"tlbb\"\nnamespace = \"example-org\"\n[[repo]]\ndir = \"$CP_HOME/cp-conf\"\n",
         )
         .unwrap();
         assert_eq!(c.host, "tlbb");
-        assert_eq!(c.namespace, "codogenics");
+        assert_eq!(c.namespace.as_deref(), Some("example-org"));
         assert_eq!(c.repo.len(), 1);
         assert_eq!(c.repo[0].name(), "cp-conf");
         assert!(c.git_flags.is_empty() && c.pre_clone.0.is_empty());
@@ -232,7 +270,7 @@ mod tests {
         let c = parse(
             r#"
 host = "tlbb"
-namespace = "codogenics"
+namespace = "example-org"
 git-flags = ["-c", "http.x=y"]
 clone-flags = ["--filter=blob:none"]
 pre-clone = "echo global pre"
@@ -273,12 +311,48 @@ post-clone = ["mill compile", "echo done"]
     }
 
     #[test]
-    fn requires_host_and_namespace() {
+    fn requires_host() {
+        // host is required by serde; missing it is a parse error.
         assert!(parse("namespace = \"o\"\n").unwrap_err().contains("host"));
-        assert!(parse("host = \"h\"\n")
-            .unwrap_err()
-            .to_lowercase()
-            .contains("namespace"));
+    }
+
+    #[test]
+    fn namespace_optional_at_parse() {
+        // global namespace is now optional — host alone parses (validation is
+        // separate and per-repo).
+        let c = parse("host = \"h\"\n").unwrap();
+        assert_eq!(c.namespace, None);
+        assert!(c.validate().is_ok()); // no repos -> nothing to resolve
+    }
+
+    #[test]
+    fn per_repo_namespace_overrides_global() {
+        let c = parse(
+            "host=\"gh\"\nnamespace=\"glob\"\n[[repo]]\ndir=\"$H/a\"\n[[repo]]\ndir=\"$H/b\"\nnamespace=\"bob\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.namespace_for(&c.repo[0]), Some("glob")); // falls back to global
+        assert_eq!(c.namespace_for(&c.repo[1]), Some("bob")); // per-repo wins
+    }
+
+    #[test]
+    fn validate_ok_with_per_repo_namespace_no_global() {
+        // no global namespace, but each repo supplies its own -> valid
+        let c = parse(
+            "host=\"gh\"\n[[repo]]\ndir=\"$H/a\"\nnamespace=\"alice\"\n[[repo]]\ndir=\"$H/b\"\nnamespace=\"bob\"\n",
+        )
+        .unwrap();
+        assert!(c.validate().is_ok());
+        assert_eq!(c.namespace_for(&c.repo[0]), Some("alice"));
+    }
+
+    #[test]
+    fn validate_errors_when_no_namespace() {
+        // no global, and this repo has none -> validate names the offending dir
+        let c = parse("host=\"gh\"\n[[repo]]\ndir=\"$H/lonely\"\n").unwrap();
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("$H/lonely"), "names the dir: {err}");
+        assert!(err.contains("namespace"));
     }
 
     #[test]
@@ -289,8 +363,8 @@ post-clone = ["mill compile", "echo done"]
     #[test]
     fn scp_url_parses_alias_form_only() {
         assert_eq!(
-            scp_url_parts("tlbb:codogenics/cosp.git"),
-            Some(("tlbb".into(), "codogenics".into()))
+            scp_url_parts("tlbb:example-org/cosp.git"),
+            Some(("tlbb".into(), "example-org".into()))
         );
         assert_eq!(
             scp_url_parts("ctl:grp/sub/repo.git"),
@@ -303,9 +377,9 @@ post-clone = ["mill compile", "echo done"]
 
     #[test]
     fn template_fills_or_placeholders() {
-        let filled = template(Some("tlbb"), Some("codogenics"));
+        let filled = template(Some("tlbb"), Some("example-org"));
         assert!(filled.contains("host      = \"tlbb\""));
-        assert!(filled.contains("namespace = \"codogenics\""));
+        assert!(filled.contains("namespace = \"example-org\""));
         assert!(filled.contains("[[repo]]"));
         assert!(filled.contains(r#"post-clone = ["git config gkit.baseBranch main"]"#));
         let blank = template(None, None);

@@ -74,7 +74,22 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
             let name = r.name();
             let dir_s = expand_path(&r.dir, |k| std::env::var(k).ok());
             let dir = PathBuf::from(&dir_s);
-            let url = format!("{}:{}/{}.git", conf.host, conf.namespace, name);
+            // Per-repo namespace overrides the global one; `clone_cmd` validates this
+            // up front, so `None` here is a defensive backstop, not a normal path.
+            let ns = match conf.namespace_for(r) {
+                Some(n) => n.to_string(),
+                None => {
+                    let e = format!("no namespace for {}", r.dir);
+                    println!("FAILED   {name:<28} {e}");
+                    return CloneReport {
+                        name,
+                        dir,
+                        outcome: Outcome::Failed(e),
+                        command: String::new(),
+                    };
+                }
+            };
+            let url = format!("{}:{}/{}.git", conf.host, ns, name);
 
             // git <git-flags> clone <depth/branch> --recurse-submodules <clone-flags> <repo flags> <url> <dir>
             let mut args: Vec<String> = Vec::new();
@@ -114,7 +129,7 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
                 ("GKIT_DIR", dir_s.as_str()),
                 ("GKIT_URL", url.as_str()),
                 ("GKIT_HOST", conf.host.as_str()),
-                ("GKIT_NAMESPACE", conf.namespace.as_str()),
+                ("GKIT_NAMESPACE", ns.as_str()),
             ];
 
             // 1+2: pre-clone hooks (cwd = parent of target; create it first)
@@ -178,10 +193,20 @@ mod tests {
 
     #[test]
     fn builds_expected_url_shape() {
-        let c = conf::parse("host = \"tlbb\"\nnamespace = \"codogenics\"\n[[repo]]\ndir = \"$HOME/x/cosp\"\ndepth = 1\n").unwrap();
+        let c = conf::parse("host = \"tlbb\"\nnamespace = \"example-org\"\n[[repo]]\ndir = \"$HOME/x/cosp\"\ndepth = 1\n").unwrap();
         assert_eq!(c.repo[0].name(), "cosp");
         assert_eq!(c.repo[0].depth, Some(1));
-        let url = format!("{}:{}/{}.git", c.host, c.namespace, c.repo[0].name());
-        assert_eq!(url, "tlbb:codogenics/cosp.git");
+        let ns = c.namespace_for(&c.repo[0]).unwrap();
+        let url = format!("{}:{}/{}.git", c.host, ns, c.repo[0].name());
+        assert_eq!(url, "tlbb:example-org/cosp.git");
+    }
+
+    #[test]
+    fn per_repo_namespace_drives_url() {
+        let c = conf::parse("host=\"gh\"\n[[repo]]\ndir=\"$HOME/x/foo\"\nnamespace=\"alice\"\n")
+            .unwrap();
+        let ns = c.namespace_for(&c.repo[0]).unwrap();
+        let url = format!("{}:{}/{}.git", c.host, ns, c.repo[0].name());
+        assert_eq!(url, "gh:alice/foo.git");
     }
 }

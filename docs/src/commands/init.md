@@ -19,7 +19,7 @@ gkit init [file] [--force]
 ```text
 $ gkit init
 created repos.toml
-  host/namespace inferred from origin: tlbb:codogenics
+  host/namespace inferred from origin: tlbb:example-org
 ```
 
 Generated `repos.toml`:
@@ -27,7 +27,7 @@ Generated `repos.toml`:
 ```toml
 # gkit clone config — run `gkit clone <this-file>`.
 host      = "tlbb"        # ssh Host alias (~/.ssh/config); URL = host:namespace/repo.git
-namespace = "codogenics"  # GitHub org / GitLab group / user
+namespace = "example-org"  # GitHub org / GitLab group / user (optional — a repo may set its own)
 
 # `gkit.baseBranch` = this repo's integration branch. `gkit logoff` and `gkit stmb`
 # read it as the "base": the branch stmb returns to, and the one logoff flags you
@@ -42,6 +42,8 @@ post-clone = ["git config gkit.baseBranch main"]   # change to your convention: 
 # One [[repo]] block per repo (name = basename of dir; $VAR/~ expanded):
 [[repo]]
 dir = "$HOME/work/example"
+# namespace   = "other-org"   # override the global namespace for THIS repo
+# name        = "example"     # remote repo name if it differs from the dir basename
 # depth       = 1
 # branch      = "dev"
 # clone-flags = ["--no-tags"]

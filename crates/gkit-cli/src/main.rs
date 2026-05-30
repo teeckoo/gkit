@@ -157,6 +157,12 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
                 continue;
             }
         };
+        // Fail before cloning anything if a repo can't resolve a namespace.
+        if let Err(e) = cfg.validate() {
+            eprintln!("gkit: {}: {e}", conf_path.display());
+            failed = true;
+            continue;
+        }
         // clone_all prints each step in order (commands, hooks, status).
         let reports = clone::clone_all(&SystemGit, &cfg, &opts);
         if reports

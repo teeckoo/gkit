@@ -14,7 +14,7 @@ gkit clone <conf…> [--no-submodule-branch] [--no-direnv]
 is not accepted (use a shell glob for "every conf here"):
 
 ```sh
-gkit clone codogenics.toml acme.toml   # explicit list
+gkit clone example-org.toml acme.toml   # explicit list
 gkit clone *.toml                      # every conf in the cwd (shell glob)
 gkit clone confs/*.toml                # every conf in confs/ (shell glob)
 ```
@@ -50,7 +50,7 @@ built-ins → global/repo post) is documented there.
 
 ```toml
 host      = "tlbb"
-namespace = "codogenics"
+namespace = "example-org"
 clone-flags = ["--filter=blob:none"]
 
 [[repo]]
@@ -62,7 +62,7 @@ post-clone  = ["echo done $GKIT_REPO"]
 
 ```text
 $ gkit clone repos.toml
-+ git clone --branch dev --single-branch --recurse-submodules --filter=blob:none --no-tags tlbb:codogenics/cosp.git /Users/you/work/cosp
++ git clone --branch dev --single-branch --recurse-submodules --filter=blob:none --no-tags tlbb:example-org/cosp.git /Users/you/work/cosp
 + echo done $GKIT_REPO
 done cosp
 cloned   cosp     /Users/you/work/cosp

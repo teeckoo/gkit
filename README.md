@@ -65,7 +65,7 @@ global and per-repo flags and pre/post-clone hooks:
 
 ```toml
 host      = "tlbb"
-namespace = "codogenics"      # GitHub org / GitLab group / user; URL = host:namespace/repo.git
+namespace = "example-org"      # org/group/user; URL = host:namespace/repo.git (optional — see below)
 
 clone-flags = ["--filter=blob:none"]          # raw flags for every clone (after `clone`)
 post-clone  = ["echo done $GKIT_REPO"]        # runs after every repo's clone
@@ -81,9 +81,17 @@ clone-flags = ["--no-tags"]                   # per-repo raw flags
 post-clone  = ["mill compile"]                # per-repo hook
 
 [[repo]]
+dir       = "$HOME/work/other"
+namespace = "other-org"                       # override the global namespace for THIS repo
+
+[[repo]]
 dir  = "$HOME/work/cosp-mirror"               # clone into a differently-named dir:
 name = "cosp"                                 #   remote repo `cosp` -> dir `cosp-mirror`
 ```
+
+`namespace` may be global, per-repo, or both (per-repo wins) — so one conf can span
+several orgs/users under the same `host`. The global one is **optional**, but every
+repo must resolve a namespace or `gkit clone` errors before cloning anything.
 
 ```sh
 gkit clone repos.toml        # clones missing repos (prints each git command)
