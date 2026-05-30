@@ -676,14 +676,20 @@ fn die(msg: &str) -> ExitCode {
 mod tests {
     use super::resolve_confs;
     use std::fs;
+    use std::path::PathBuf;
 
     // `--conf` (and `clone`) take a list of conf sources from ANY directory: an
     // explicit file is kept as-is, a directory expands to its sorted `*.toml`
     // (non-`.toml` ignored), and a file + a dir can be mixed.
+    //
+    // We assert on the resolved file *names* (and order), not full PathBufs: the
+    // selection/sort/exclusion logic is what matters, and name comparison is robust
+    // to OS path normalization (Windows verbatim/short-name prefixes, separators).
     #[test]
     fn resolve_confs_keeps_files_and_expands_dirs() {
         let base = std::env::temp_dir().join(format!("gkit-rc-{}", std::process::id()));
         let dir = base.join("confs");
+        let _ = fs::remove_dir_all(&base); // clear any stale leftovers from a prior run
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("b.toml"), "").unwrap();
         fs::write(dir.join("a.toml"), "").unwrap();
@@ -692,19 +698,21 @@ mod tests {
         fs::write(&lone, "").unwrap();
 
         let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let names = |v: Vec<PathBuf>| {
+            v.iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
 
         // a directory -> its *.toml, sorted; note.txt excluded
-        assert_eq!(
-            resolve_confs(&[s(&dir)]),
-            vec![dir.join("a.toml"), dir.join("b.toml")]
-        );
+        assert_eq!(names(resolve_confs(&[s(&dir)])), ["a.toml", "b.toml"]);
 
         // an explicit file (from a different dir) kept as-is, mixed with a dir
         assert_eq!(
-            resolve_confs(&[s(&lone), s(&dir)]),
-            vec![lone.clone(), dir.join("a.toml"), dir.join("b.toml")],
+            names(resolve_confs(&[s(&lone), s(&dir)])),
+            ["lone.toml", "a.toml", "b.toml"]
         );
 
-        fs::remove_dir_all(&base).ok();
+        let _ = fs::remove_dir_all(&base);
     }
 }
