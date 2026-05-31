@@ -8,22 +8,17 @@ placeholders to fill in.
 ## Synopsis
 
 ```sh
-gkit init [file] [--force] [--solo]
+gkit init [file] [--force]
 ```
 
 - `file` — defaults to `repos.toml`.
 - `--force` — overwrite an existing file (otherwise `init` refuses).
-- `--solo` — write `solo = true` (solo-developer workflow). Without it, an
-  **interactive** run asks "Are you a solo developer?" (default no = team); a
-  non-interactive run defaults to team (`solo = false`).
 
 ## Example
 
 ```text
 $ gkit init
-Are you a solo developer? (team workflow = no) [y/N]: n
 created repos.toml
-  workflow: team (solo=false)
   host/namespace inferred from origin: tlbb:example-org
 ```
 
@@ -33,12 +28,6 @@ Generated `repos.toml`:
 # gkit clone config — run `gkit clone <this-file>`.
 host      = "tlbb"        # ssh Host alias (~/.ssh/config); URL = host:namespace/repo.git
 namespace = "example-org"  # GitHub org / GitLab group / user (optional — a repo may set its own)
-
-# solo developer? `gkit clone` stamps this into `git config gkit.solo`. When true,
-# `gkit logoff` also flags you for sitting on the integration branch while feature
-# branches still exist on the remote (a leftover branch = unfinished work). Team
-# workflow (false, default) ignores others' remote branches.
-solo = false
 
 # `gkit.baseBranch` = this repo's integration branch. `gkit logoff` and `gkit stmb`
 # read it as the "base": the branch stmb returns to, and the one logoff checks

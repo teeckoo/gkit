@@ -8,7 +8,7 @@
 use clap::{Args, Parser, Subcommand};
 use gkit_core::git::{Git, SystemGit};
 use gkit_core::{checks, clone, conf, config, key, report, stmb, submodules};
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -55,10 +55,6 @@ struct InitArgs {
     /// Overwrite if the file already exists.
     #[arg(long)]
     force: bool,
-    /// Solo-developer workflow (sets `solo = true` in the conf). Without this,
-    /// an interactive run asks; non-interactive defaults to team (`solo = false`).
-    #[arg(long)]
-    solo: bool,
 }
 
 fn init_cmd(args: InitArgs) -> ExitCode {
@@ -80,20 +76,11 @@ fn init_cmd(args: InitArgs) -> ExitCode {
         Some((h, n)) => (Some(h.as_str()), Some(n.as_str())),
         None => (None, None),
     };
-    // Solo vs team: explicit --solo wins; otherwise ask interactively (default
-    // team); a non-interactive run never blocks and defaults to team.
-    let solo = args.solo
-        || (std::io::stdin().is_terminal()
-            && confirm("Are you a solo developer? (team workflow = no)"));
-    let text = conf::template(host, ns, solo);
+    let text = conf::template(host, ns);
     if let Err(e) = std::fs::write(&path, &text) {
         return die(&format!("cannot write {}: {e}", args.file));
     }
     println!("created {}", args.file);
-    println!(
-        "  workflow: {} (solo={solo})",
-        if solo { "solo" } else { "team" }
-    );
     match parts {
         Some((h, n)) => println!("  host/namespace inferred from origin: {h}:{n}"),
         None => println!("  fill in `host` and `namespace`, then add [[repo]] blocks"),

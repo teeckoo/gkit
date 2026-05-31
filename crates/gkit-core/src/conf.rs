@@ -49,12 +49,6 @@ pub struct CloneConf {
     /// Commands run after every repo's clone.
     #[serde(default)]
     pub post_clone: Hooks,
-    /// Solo-developer workflow (global default). When set, `gkit clone` stamps
-    /// `git config gkit.solo <bool>` on each repo; `gkit logoff`'s correct-branch
-    /// check then also flags sitting on the integration branch while feature
-    /// branches exist on the remote. A repo may override via its own `solo`.
-    #[serde(default)]
-    pub solo: Option<bool>,
     #[serde(default)]
     pub repo: Vec<Repo>,
 }
@@ -83,22 +77,12 @@ pub struct Repo {
     pub pre_clone: Hooks,
     #[serde(default)]
     pub post_clone: Hooks,
-    /// Per-repo solo override (wins over the global `solo`).
-    #[serde(default)]
-    pub solo: Option<bool>,
 }
 
 impl CloneConf {
     /// Effective namespace for a repo: its own `namespace`, else the global one.
     pub fn namespace_for<'a>(&'a self, repo: &'a Repo) -> Option<&'a str> {
         repo.namespace.as_deref().or(self.namespace.as_deref())
-    }
-
-    /// Effective `solo` for a repo: its own `solo`, else the global one. `None`
-    /// means "not configured" — `gkit clone` then stamps nothing (logoff defaults
-    /// to team).
-    pub fn solo_for(&self, repo: &Repo) -> Option<bool> {
-        repo.solo.or(self.solo)
     }
 
     /// Every repo must resolve a namespace (per-repo or global). Returns an error
@@ -224,19 +208,13 @@ pub fn scp_url_parts(url: &str) -> Option<(String, String)> {
 
 /// A starter clone config (sensible defaults + commented examples). `host`/
 /// `namespace` are pre-filled when known, else left as placeholders.
-pub fn template(host: Option<&str>, namespace: Option<&str>, solo: bool) -> String {
+pub fn template(host: Option<&str>, namespace: Option<&str>) -> String {
     let host = host.unwrap_or("<ssh-host-alias>");
     let namespace = namespace.unwrap_or("<namespace>");
     format!(
         r#"# gkit clone config — run `gkit clone <this-file>`.
 host      = "{host}"        # ssh Host alias (~/.ssh/config); URL = host:namespace/repo.git
 namespace = "{namespace}"   # GitHub org / GitLab group / user (optional — a repo may set its own)
-
-# solo developer? `gkit clone` stamps this into `git config gkit.solo`. When true,
-# `gkit logoff` also flags you for sitting on the integration branch while feature
-# branches still exist on the remote (a leftover branch = unfinished work). Team
-# workflow (false, default) ignores others' remote branches.
-solo = {solo}
 
 # `gkit.baseBranch` = this repo's integration branch. `gkit logoff` and `gkit stmb`
 # read it as the "base": the branch stmb returns to, and the one logoff checks
@@ -398,31 +376,20 @@ post-clone = ["mill compile", "echo done"]
     }
 
     #[test]
-    fn solo_global_and_per_repo_override() {
-        // global solo applies to a repo without its own; per-repo wins.
-        let c = parse(
-            "host=\"h\"\nnamespace=\"o\"\nsolo=true\n[[repo]]\ndir=\"$H/a\"\n[[repo]]\ndir=\"$H/b\"\nsolo=false\n",
-        )
-        .unwrap();
-        assert_eq!(c.solo, Some(true));
-        assert_eq!(c.solo_for(&c.repo[0]), Some(true)); // inherits global
-        assert_eq!(c.solo_for(&c.repo[1]), Some(false)); // per-repo wins
-                                                         // unset entirely -> None (clone stamps nothing)
-        let d = parse("host=\"h\"\nnamespace=\"o\"\n[[repo]]\ndir=\"$H/a\"\n").unwrap();
-        assert_eq!(d.solo_for(&d.repo[0]), None);
+    fn rejects_solo_field() {
+        // `solo` is no longer a conf key — it's set manually via `git config
+        // gkit.solo`. A leftover `solo =` must be a hard parse error.
+        assert!(parse("host=\"h\"\nnamespace=\"o\"\nsolo=true\n").is_err());
     }
 
     #[test]
     fn template_fills_or_placeholders() {
-        let filled = template(Some("tlbb"), Some("example-org"), false);
+        let filled = template(Some("tlbb"), Some("example-org"));
         assert!(filled.contains("host      = \"tlbb\""));
         assert!(filled.contains("namespace = \"example-org\""));
-        assert!(filled.contains("solo = false"));
         assert!(filled.contains("[[repo]]"));
         assert!(filled.contains(r#"post-clone = ["git config gkit.baseBranch main"]"#));
-        // solo=true variant emits the bool
-        assert!(template(Some("h"), Some("o"), true).contains("solo = true"));
-        let blank = template(None, None, false);
+        let blank = template(None, None);
         assert!(blank.contains("<ssh-host-alias>") && blank.contains("<namespace>"));
         // the template must itself be valid TOML that parses
         assert!(parse(&filled).is_ok());

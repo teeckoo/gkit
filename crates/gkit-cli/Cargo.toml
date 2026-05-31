@@ -16,4 +16,4 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 # version is REQUIRED so `cargo publish` can resolve gkit-core from crates.io
-gkit-core = { path = "../gkit-core", version = "0.2.0" }
+gkit-core = { path = "../gkit-core", version = "0.3.0" }

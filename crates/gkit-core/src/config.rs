@@ -113,7 +113,8 @@ pub fn resolve_base(git: &dyn Git, dir: &Path, cli_override: Option<&str>) -> Re
 /// sitting on an integration branch while feature branches exist on the remote —
 /// meaningful for a solo developer where every remote branch is their own.
 /// Honors git's config layering: `--global` for a personal default, repo config
-/// to override. Stamped by `gkit clone` from the conf's `solo` field.
+/// to override. Set manually (e.g. `git config gkit.solo true`) — `gkit clone`
+/// does not stamp it.
 pub fn resolve_solo(git: &dyn Git, dir: &Path) -> bool {
     let o = git.run(dir, &["config", "--get", "--bool", "gkit.solo"]);
     o.success && o.trimmed() == "true"

@@ -59,7 +59,6 @@ anything**, naming the offending dir.
 | `git-flags` | raw flags injected **before** `clone` (git-level). |
 | `clone-flags` | raw flags injected **after** `clone`, every repo. |
 | `pre-clone` / `post-clone` | global hook commands (string or list). |
-| `solo` | `true`/`false`; stamped into `git config gkit.solo` on each cloned repo. Turns on `logoff`'s strict correct-branch rule (flags parking on the integration branch while feature branches exist on the remote). Default team (unset → not stamped). |
 
 ## `[[repo]]` keys
 
@@ -72,14 +71,13 @@ anything**, naming the offending dir.
 | `branch = "B"` | `--branch B --single-branch`. |
 | `clone-flags` | per-repo raw flags **after** `clone`. |
 | `pre-clone` / `post-clone` | per-repo hook commands (string or list). |
-| `solo` | per-repo override of the global `solo` (see above). |
 
 ## Execution order (per repo)
 
 1. global `pre-clone`
 2. repo `pre-clone`
 3. `git <git-flags> clone [--depth N] [--branch B --single-branch] --recurse-submodules <clone-flags> <repo clone-flags> <url> <dir>` — **printed**, output captured
-4. **built-ins** (unless disabled): submodule init + branch-switch, `git config gkit.solo <v>` (when `solo` is set), `direnv allow`
+4. **built-ins** (unless disabled): submodule init + branch-switch, `direnv allow`
 5. global `post-clone`
 6. repo `post-clone`
 

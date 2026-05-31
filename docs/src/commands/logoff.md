@@ -48,8 +48,7 @@ For each repo and submodule, all must pass:
    - **solo** (`gkit.solo` on) — fails if the **remote** has **any** feature branch.
      For a solo developer every remote branch is yours, so a leftover one means
      unfinished/uncleaned work. Set `git config gkit.solo true` (per repo) or
-     `git config --global gkit.solo true` (your default); `gkit clone` stamps it from
-     the conf's `solo` field.
+     `git config --global gkit.solo true` (your default).
 
    The base is resolved from `--base-branch` → `git config gkit.baseBranch` → a
    remote-tracking branch (`origin/main`, else `origin/master`); `main`/`master` are

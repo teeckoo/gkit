@@ -593,17 +593,7 @@ fn init_creates_team_conf_by_default() {
     let text = std::fs::read_to_string(d.join("repos.toml")).unwrap();
     assert_contains(&text, "host");
     assert_contains(&text, "[[repo]]");
-    assert_contains(&text, "solo = false");
     assert_eq!(o.code, 0);
-}
-
-#[test]
-fn init_solo_flag_writes_solo_true() {
-    let d = temp_dir("init-solo");
-    let o = gkit(&d, &["init", "--solo", "repos.toml"]);
-    assert_eq!(o.code, 0);
-    let text = std::fs::read_to_string(d.join("repos.toml")).unwrap();
-    assert_contains(&text, "solo = true");
 }
 
 #[test]
