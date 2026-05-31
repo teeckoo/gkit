@@ -28,6 +28,7 @@ pub fn print_verbose(entries: &[Entry]) {
         println!("{p}\tall-commits-pushed\t{}", s.all_commits_pushed);
         println!("{p}\tbranches-have-remote\t{}", s.branches_have_remote);
         println!("{p}\tnot-behind-remote\t{}", s.not_behind_remote);
+        println!("{p}\tbase-branch\t{}", s.base.describe());
         println!("{p}\tcorrect-branch\t{}", s.correct_branch);
         println!("{p}\tRESULT\t{}\t{}", s.branch, s.ok());
     }

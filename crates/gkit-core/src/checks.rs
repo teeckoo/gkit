@@ -2,6 +2,7 @@
 //! (code-conf `gitCoreLib.sh`). Each is a pure function over a `&dyn Git`, so it
 //! can be unit-tested with `FakeGit`. A repo is "ok" only if all five pass.
 
+use crate::config::ResolvedBase;
 use crate::git::Git;
 use std::collections::HashSet;
 use std::path::Path;
@@ -114,6 +115,9 @@ pub struct RepoStatus {
     pub branches_have_remote: bool,
     pub not_behind_remote: bool,
     pub correct_branch: bool,
+    /// The base branch used for the correct-branch check + how it was resolved.
+    /// When `base.name` is `None` (unresolved), `correct_branch` is forced `false`.
+    pub base: ResolvedBase,
     /// Set when the path couldn't be checked at all (missing dir / not a git
     /// repo). When present, the gate FAILS and `problem` is shown in place of the
     /// checks — otherwise a non-repo would pass every check vacuously (empty git
@@ -132,6 +136,7 @@ impl RepoStatus {
             branches_have_remote: false,
             not_behind_remote: false,
             correct_branch: false,
+            base: ResolvedBase::unresolved(),
             problem: Some(reason.into()),
         }
     }
@@ -147,15 +152,22 @@ impl RepoStatus {
     }
 }
 
-/// Run all five checks for a single repo at `dir`.
-pub fn evaluate(git: &dyn Git, dir: &Path, base_branch: &str) -> RepoStatus {
+/// Run all five checks for a single repo at `dir`. An unresolved base
+/// (`base.name == None`) forces the correct-branch check to fail — the base
+/// couldn't be determined, so we can't certify the right branch is checked out.
+pub fn evaluate(git: &dyn Git, dir: &Path, base: &ResolvedBase) -> RepoStatus {
+    let correct_branch = match &base.name {
+        Some(b) => correct_branch(git, dir, b),
+        None => false,
+    };
     RepoStatus {
         branch: current_branch(git, dir),
         committed: committed(git, dir),
         all_commits_pushed: all_commits_pushed(git, dir),
         branches_have_remote: branches_have_remote(git, dir),
         not_behind_remote: not_behind_remote(git, dir),
-        correct_branch: correct_branch(git, dir, base_branch),
+        correct_branch,
+        base: base.clone(),
         problem: None,
     }
 }
@@ -281,8 +293,38 @@ mod tests {
             .ok("show-ref --quiet refs/remotes/origin/dev", "")
             .ok("rev-list --left-right --count origin/dev...dev", "0\t0")
             .ok("ls-remote --heads origin", "aaa\trefs/heads/dev");
-        let st = evaluate(&g, d(), "dev");
+        let base = ResolvedBase {
+            name: Some("dev".into()),
+            source: crate::config::BaseSource::Config,
+        };
+        let st = evaluate(&g, d(), &base);
         assert!(st.ok(), "expected all-clear, got {st:?}");
         assert_eq!(st.branch, "dev");
+    }
+
+    #[test]
+    fn unresolved_base_fails_correct_branch() {
+        // Everything else is clean, but the base couldn't be resolved → the gate
+        // fails on correct-branch rather than passing vacuously.
+        let g = FakeGit::new()
+            .ok("rev-parse --abbrev-ref HEAD", "feature-x")
+            .ok("status -s", "")
+            .ok("log --oneline --branches --not --remotes", "")
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/remotes/origin/*",
+                "origin/feature-x",
+            )
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/heads/*",
+                "feature-x",
+            )
+            .ok("show-ref --quiet refs/remotes/origin/feature-x", "")
+            .ok(
+                "rev-list --left-right --count origin/feature-x...feature-x",
+                "0\t0",
+            );
+        let st = evaluate(&g, d(), &ResolvedBase::unresolved());
+        assert!(!st.correct_branch);
+        assert!(!st.ok());
     }
 }

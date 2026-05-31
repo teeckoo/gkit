@@ -66,8 +66,9 @@ fn collect_repos(git: &dyn Git, root: &Path) -> Vec<PathBuf> {
 /// returned Vec is in the fixed post-order DFS order.
 ///
 /// `base_override` (the CLI `--base-branch`) applies only to the root; each
-/// submodule resolves its own `gkit.baseBranch`. Like the zsh, submodules are
-/// fetched before checking (when `fetch`), the root is not.
+/// submodule resolves its own base (`gkit.baseBranch`, then remote
+/// `origin/main`/`origin/master`). Like the zsh, submodules are fetched before
+/// checking (when `fetch`), the root is not.
 pub fn evaluate_tree<G: Git + Sync>(
     git: &G,
     root: &Path,
@@ -104,7 +105,7 @@ pub fn evaluate_tree<G: Git + Sync>(
                     let _ = git.run(&path, &["fetch", "--quiet"]);
                     let _ = git.run(&path, &["remote", "prune", "origin"]);
                 }
-                let base = crate::config::resolve_base_branch(git, &path, ovr);
+                let base = crate::config::resolve_base(git, &path, ovr);
                 checks::evaluate(git, &path, &base)
             });
             handles.push((i, handle));

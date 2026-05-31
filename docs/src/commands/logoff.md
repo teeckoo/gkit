@@ -23,8 +23,9 @@ gkit logoff --conf *.toml                 # every repo in the cwd's confs
 gkit logoff --conf ~/a/x.toml ~/b/y.toml  # confs from different directories
 ```
 
-In fleet mode each repo resolves its own base branch (`gkit.baseBranch` → HEAD).
-Exit is non-zero if any repo fails a check or any conf fails to parse.
+In fleet mode each repo resolves its own base branch (`gkit.baseBranch`, then
+remote `origin/main`/`origin/master`). Exit is non-zero if any repo fails a check
+or any conf fails to parse.
 
 ## The five checks
 
@@ -35,9 +36,12 @@ For each repo and submodule, all must pass:
 3. **branches-have-remote** — every local branch has a remote counterpart.
 4. **not-behind-remote** — current branch isn't behind `origin/<branch>`.
 5. **correct-branch** — you're not sitting on the base/integration branch while
-   feature branches exist on the remote. The base is resolved from
-   `git config gkit.baseBranch` → `--base-branch` → current HEAD; `main`/`master`
-   are always treated as integration branches too.
+   feature branches exist on the remote. The base is resolved from `--base-branch`
+   → `git config gkit.baseBranch` → a remote-tracking branch (`origin/main`, else
+   `origin/master`); `main`/`master` are always treated as integration branches
+   too. If **none** of those yield a base (e.g. a single-branch clone of a feature
+   branch), the base is **unresolved** and this check **fails** rather than passing
+   vacuously — `--verbose` prints why. Set `git config gkit.baseBranch <b>` to fix.
 
 ## Output
 
@@ -53,8 +57,15 @@ Default (one line per repo, post-order: submodules before their parent):
 ```text
 /path/repo	committed	true
 /path/repo	all-commits-pushed	false
+/path/repo	base-branch	dev (from git config gkit.baseBranch)
+/path/repo	correct-branch	true
 /path/repo	RESULT	dev	false
 ```
+
+The `base-branch` line shows the resolved base **and how it was derived** —
+`(from --base-branch)`, `(from git config gkit.baseBranch)`, or
+`(derived from remote origin/main)`. When it can't be resolved it reads
+`UNRESOLVED — …` and `correct-branch` is `false`.
 
 Greppable: `gkit logoff -v | grep -w false`, `… | awk -F'\t' '$NF=="false"'`.
 

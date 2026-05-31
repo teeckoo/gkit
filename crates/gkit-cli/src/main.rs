@@ -198,7 +198,8 @@ struct LogoffArgs {
     /// Skip fetching submodules before checking (faster / offline).
     #[arg(long)]
     no_fetch: bool,
-    /// Override the base branch (root only). Otherwise: gkit.baseBranch, then HEAD.
+    /// Override the base branch (root only). Otherwise: gkit.baseBranch, then
+    /// remote origin/main or origin/master.
     #[arg(long)]
     base_branch: Option<String>,
 }
@@ -245,7 +246,7 @@ fn logoff_cmd(args: LogoffArgs) -> ExitCode {
     }
 
     for dir in &dirs {
-        // In conf mode each repo resolves its own base (gkit.baseBranch -> HEAD).
+        // In conf mode each repo resolves its own base (gkit.baseBranch -> remote).
         let base = if args.conf {
             None
         } else {
