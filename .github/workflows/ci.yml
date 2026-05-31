@@ -43,4 +43,19 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Hermetic suite (incl. tests/cli.rs); tests/net.rs self-skips without the gate.
       - run: cargo test --workspace --all-features
+
+  # Network-gated integration tests (tests/net.rs): clone a public repo over HTTPS
+  # (no ssh) and run logoff. Kept off the 3-OS matrix so it stays hermetic/fast;
+  # runs ubuntu-only with the gate set. Needs no secrets (public repo).
+  net-tests:
+    name: net tests (ubuntu, gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p gkit --test net -- --nocapture
+        env:
+          GKIT_NET_TESTS: "1"

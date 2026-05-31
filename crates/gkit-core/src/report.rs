@@ -29,6 +29,11 @@ pub fn print_verbose(entries: &[Entry]) {
         println!("{p}\tbranches-have-remote\t{}", s.branches_have_remote);
         println!("{p}\tnot-behind-remote\t{}", s.not_behind_remote);
         println!("{p}\tbase-branch\t{}", s.base.describe());
+        // Explain the active correct-branch rule only when it's the non-default
+        // solo rule — keeps the team-default output noise-free.
+        if matches!(s.rule, crate::checks::BranchRule::Solo) {
+            println!("{p}\tbranch-rule\t{}", s.rule.describe());
+        }
         println!("{p}\tcorrect-branch\t{}", s.correct_branch);
         println!("{p}\tRESULT\t{}\t{}", s.branch, s.ok());
     }

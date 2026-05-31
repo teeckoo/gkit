@@ -164,6 +164,14 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
                     &["submodule", "foreach", "--recursive", SUBMODULE_SWITCH],
                 );
             }
+            // Stamp the solo workflow flag (conf `solo`, per-repo over global) so
+            // `gkit logoff` reads it from `git config gkit.solo`. Printed like any
+            // other step; only when the conf sets it.
+            if let Some(v) = conf.solo_for(r) {
+                let val = if v { "true" } else { "false" };
+                println!("+ git config gkit.solo {val}");
+                let _ = git.run(&dir, &["config", "gkit.solo", val]);
+            }
             if opts.direnv && dir.join(".envrc").exists() {
                 let _ = Command::new("direnv").arg("allow").arg(&dir).output(); // trust-only, no eval
             }

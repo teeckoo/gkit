@@ -86,24 +86,116 @@ fn is_integration(branch: &str, base_branch: &str) -> bool {
     branch == base_branch || branch == "main" || branch == "master"
 }
 
-/// 5. Correct branch: NOT ok only if the remote has "feature" branches
-///    (any head that is not an integration branch) AND we're currently sitting on
-///    an integration branch (base / main / master).
-pub fn correct_branch(git: &dyn Git, dir: &Path, base_branch: &str) -> bool {
-    let cur = current_branch(git, dir);
-    if !is_integration(&cur, base_branch) {
-        return true; // on a feature branch — fine
+/// The ref to compare "merged into base" against: the local `<base>` branch if it
+/// exists, else the remote-tracking `origin/<base>`. After a normal clone you
+/// often only have the default branch locally, so the remote-tracking ref is the
+/// usable stand-in.
+fn base_ref_for(git: &dyn Git, dir: &Path, base_branch: &str) -> String {
+    let local = format!("refs/heads/{base_branch}");
+    if git
+        .run(dir, &["show-ref", "--verify", "--quiet", &local])
+        .success
+    {
+        base_branch.to_string()
+    } else {
+        format!("origin/{base_branch}")
     }
-    let has_feature = git
-        .run(dir, &["ls-remote", "--heads", "origin"])
+}
+
+/// Which correct-branch rule set applies — selected by `gkit.solo`. The two are
+/// **mutually exclusive**: exactly one runs. This is the single place that decides
+/// "when to use which rule".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchRule {
+    /// Default (`gkit.solo` off). Flags only a **local** branch unmerged into base
+    /// (your own unfinished work); others' branches on the remote are ignored.
+    Team,
+    /// `gkit.solo` on. Flags **any** feature branch on the **remote** (for a solo
+    /// developer every remote branch is theirs, so a leftover one = unfinished
+    /// work). The original strict behavior.
+    Solo,
+}
+
+impl BranchRule {
+    pub fn from_solo(solo: bool) -> Self {
+        if solo {
+            BranchRule::Solo
+        } else {
+            BranchRule::Team
+        }
+    }
+
+    /// One-line "which rule + why" for `logoff -v` — its own line, so the
+    /// `correct-branch` line stays a bare boolean.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            BranchRule::Team => "team (gkit.solo off) — flags a local branch unmerged into base",
+            BranchRule::Solo => "solo (gkit.solo on) — flags any feature branch on the remote",
+        }
+    }
+}
+
+/// TEAM rule helper: is there a **local** non-integration branch with commits not
+/// merged into base? (Can't determine the base ref → not flagged.)
+fn local_unmerged_feature(git: &dyn Git, dir: &Path, base_branch: &str) -> bool {
+    let base_ref = base_ref_for(git, dir, base_branch);
+    let merged = git.run(
+        dir,
+        &["branch", "--merged", &base_ref, "--format=%(refname:short)"],
+    );
+    if !merged.success {
+        return false;
+    }
+    let merged: HashSet<&str> = merged
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    git.run(
+        dir,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads/*"],
+    )
+    .stdout
+    .lines()
+    .map(str::trim)
+    .filter(|l| !l.is_empty())
+    .any(|b| !is_integration(b, base_branch) && !merged.contains(b))
+}
+
+/// SOLO rule helper: does the **remote** have any non-integration (feature) branch?
+fn remote_has_feature(git: &dyn Git, dir: &Path, base_branch: &str) -> bool {
+    git.run(dir, &["ls-remote", "--heads", "origin"])
         .stdout
         .lines()
         .filter_map(|l| {
             l.split_once("refs/heads/")
                 .map(|(_, b)| b.trim().to_string())
         })
-        .any(|b| !is_integration(&b, base_branch));
-    !has_feature
+        .any(|b| !is_integration(&b, base_branch))
+}
+
+/// 5. Correct branch — a real-life "are you parked safely?" check (see
+///    `docs/commands/logoff.md`). Shared preamble for both rules:
+///    - **detached HEAD** → false (risky resting state; commits easily lost).
+///    - on a **feature** branch (not base/main/master) → true (actively on work).
+///
+///    On an **integration** branch, exactly one rule runs (see [`BranchRule`]):
+///    `Team` flags a local unmerged feature branch; `Solo` flags any remote
+///    feature branch.
+pub fn correct_branch(git: &dyn Git, dir: &Path, base_branch: &str, rule: BranchRule) -> bool {
+    // Detached HEAD: `symbolic-ref --short HEAD` fails when not on a branch.
+    if !git.run(dir, &["symbolic-ref", "--short", "HEAD"]).success {
+        return false;
+    }
+    let cur = current_branch(git, dir);
+    if !is_integration(&cur, base_branch) {
+        return true; // on a feature branch — fine
+    }
+    match rule {
+        BranchRule::Team => !local_unmerged_feature(git, dir, base_branch),
+        BranchRule::Solo => !remote_has_feature(git, dir, base_branch),
+    }
 }
 
 /// Outcome of all five checks for one repo.
@@ -118,6 +210,9 @@ pub struct RepoStatus {
     /// The base branch used for the correct-branch check + how it was resolved.
     /// When `base.name` is `None` (unresolved), `correct_branch` is forced `false`.
     pub base: ResolvedBase,
+    /// Which correct-branch rule applied (`gkit.solo` selects it). Surfaced in
+    /// verbose only when [`BranchRule::Solo`] (the non-default rule).
+    pub rule: BranchRule,
     /// Set when the path couldn't be checked at all (missing dir / not a git
     /// repo). When present, the gate FAILS and `problem` is shown in place of the
     /// checks — otherwise a non-repo would pass every check vacuously (empty git
@@ -137,6 +232,7 @@ impl RepoStatus {
             not_behind_remote: false,
             correct_branch: false,
             base: ResolvedBase::unresolved(),
+            rule: BranchRule::Team,
             problem: Some(reason.into()),
         }
     }
@@ -155,9 +251,11 @@ impl RepoStatus {
 /// Run all five checks for a single repo at `dir`. An unresolved base
 /// (`base.name == None`) forces the correct-branch check to fail — the base
 /// couldn't be determined, so we can't certify the right branch is checked out.
-pub fn evaluate(git: &dyn Git, dir: &Path, base: &ResolvedBase) -> RepoStatus {
+/// `solo` selects the correct-branch rule (`gkit.solo`; see [`BranchRule`]).
+pub fn evaluate(git: &dyn Git, dir: &Path, base: &ResolvedBase, solo: bool) -> RepoStatus {
+    let rule = BranchRule::from_solo(solo);
     let correct_branch = match &base.name {
-        Some(b) => correct_branch(git, dir, b),
+        Some(b) => correct_branch(git, dir, b, rule),
         None => false,
     };
     RepoStatus {
@@ -168,6 +266,7 @@ pub fn evaluate(git: &dyn Git, dir: &Path, base: &ResolvedBase) -> RepoStatus {
         not_behind_remote: not_behind_remote(git, dir),
         correct_branch,
         base: base.clone(),
+        rule,
         problem: None,
     }
 }
@@ -244,39 +343,80 @@ mod tests {
         assert!(!not_behind_remote(&behind, d()));
     }
 
+    /// Stub the on-integration path: HEAD attached on `cur`, local base `dev`
+    /// exists, with the given local branches + merged set.
+    fn on_integration(cur: &str, local_heads: &str, merged: &str) -> FakeGit {
+        FakeGit::new()
+            .ok("symbolic-ref --short HEAD", cur)
+            .ok("rev-parse --abbrev-ref HEAD", cur)
+            .ok("show-ref --verify --quiet refs/heads/dev", "")
+            .ok("branch --merged dev --format=%(refname:short)", merged)
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/heads/*",
+                local_heads,
+            )
+    }
+
     #[test]
-    fn correct_branch_only_flags_base_with_features() {
-        // On base (dev) AND remote has a feature branch -> wrong branch.
-        let on_base_with_feature = FakeGit::new().ok("rev-parse --abbrev-ref HEAD", "dev").ok(
+    fn correct_branch_detached_head_fails() {
+        // Not on any branch -> risky resting state -> false (both rules; shared preamble).
+        let g = FakeGit::new().fail("symbolic-ref --short HEAD");
+        assert!(!correct_branch(&g, d(), "dev", BranchRule::Team));
+        assert!(!correct_branch(&g, d(), "dev", BranchRule::Solo));
+    }
+
+    #[test]
+    fn correct_branch_on_feature_is_fine() {
+        let g = FakeGit::new()
+            .ok("symbolic-ref --short HEAD", "feature-x")
+            .ok("rev-parse --abbrev-ref HEAD", "feature-x");
+        assert!(correct_branch(&g, d(), "dev", BranchRule::Team));
+        assert!(correct_branch(&g, d(), "dev", BranchRule::Solo));
+    }
+
+    #[test]
+    fn team_rule_ignores_others_remote_branches() {
+        // On dev; your only LOCAL branch is dev. Others' branches live on the
+        // remote, but the team rule never scans the remote -> PASS.
+        // (The real-life win: the ideal logged-off state isn't flagged.)
+        let g = on_integration("dev", "dev", "dev");
+        assert!(correct_branch(&g, d(), "dev", BranchRule::Team));
+    }
+
+    #[test]
+    fn team_rule_flags_local_unmerged_feature() {
+        // On dev with a LOCAL feature branch not merged into dev -> unfinished work.
+        let g = on_integration("dev", "dev\nfeature-x", "dev");
+        assert!(!correct_branch(&g, d(), "dev", BranchRule::Team));
+    }
+
+    #[test]
+    fn team_rule_allows_local_merged_feature() {
+        // A local feature branch already merged into dev (just not deleted) -> PASS.
+        let g = on_integration("dev", "dev\nfeature-x", "dev\nfeature-x");
+        assert!(correct_branch(&g, d(), "dev", BranchRule::Team));
+    }
+
+    #[test]
+    fn solo_rule_flags_remote_feature_branch() {
+        // Solo rule: on dev, but the remote has a feature branch -> FAIL. The team
+        // rule on the same repo (local dev only) -> PASS (mutually exclusive).
+        let g = on_integration("dev", "dev", "dev").ok(
             "ls-remote --heads origin",
-            "aaa\trefs/heads/dev\nbbb\trefs/heads/feature-x",
+            "aaa\trefs/heads/dev\nbbb\trefs/heads/alice-x",
         );
-        assert!(!correct_branch(&on_base_with_feature, d(), "dev"));
+        assert!(correct_branch(&g, d(), "dev", BranchRule::Team));
+        assert!(!correct_branch(&g, d(), "dev", BranchRule::Solo));
+    }
 
-        // On base (dev), no feature branches -> fine.
-        let on_base_no_feature = FakeGit::new()
-            .ok("rev-parse --abbrev-ref HEAD", "dev")
-            .ok("ls-remote --heads origin", "aaa\trefs/heads/dev");
-        assert!(correct_branch(&on_base_no_feature, d(), "dev"));
-
-        // On a feature branch -> always fine, regardless of remote.
-        let on_feature = FakeGit::new().ok("rev-parse --abbrev-ref HEAD", "feature-x");
-        assert!(correct_branch(&on_feature, d(), "dev"));
-
-        // On dev, remote has dev + main (both integration) -> NOT a feature -> fine.
-        // (This is the cosp/manage-cms case that was wrongly flagged before.)
-        let dev_plus_main = FakeGit::new().ok("rev-parse --abbrev-ref HEAD", "dev").ok(
+    #[test]
+    fn solo_rule_passes_when_remote_is_integration_only() {
+        // Solo rule, remote has only dev + main (both integration) -> PASS.
+        let g = on_integration("dev", "dev", "dev").ok(
             "ls-remote --heads origin",
             "aaa\trefs/heads/dev\nbbb\trefs/heads/main",
         );
-        assert!(correct_branch(&dev_plus_main, d(), "dev"));
-
-        // On main (an integration branch) with a real feature present -> flagged.
-        let on_main_with_feature = FakeGit::new().ok("rev-parse --abbrev-ref HEAD", "main").ok(
-            "ls-remote --heads origin",
-            "aaa\trefs/heads/main\nbbb\trefs/heads/feature-y",
-        );
-        assert!(!correct_branch(&on_main_with_feature, d(), "dev"));
+        assert!(correct_branch(&g, d(), "dev", BranchRule::Solo));
     }
 
     #[test]
@@ -292,12 +432,15 @@ mod tests {
             .ok("for-each-ref --format=%(refname:short) refs/heads/*", "dev")
             .ok("show-ref --quiet refs/remotes/origin/dev", "")
             .ok("rev-list --left-right --count origin/dev...dev", "0\t0")
-            .ok("ls-remote --heads origin", "aaa\trefs/heads/dev");
+            // correct-branch (default rule): attached on dev, local dev merged.
+            .ok("symbolic-ref --short HEAD", "dev")
+            .ok("show-ref --verify --quiet refs/heads/dev", "")
+            .ok("branch --merged dev --format=%(refname:short)", "dev");
         let base = ResolvedBase {
             name: Some("dev".into()),
             source: crate::config::BaseSource::Config,
         };
-        let st = evaluate(&g, d(), &base);
+        let st = evaluate(&g, d(), &base, false);
         assert!(st.ok(), "expected all-clear, got {st:?}");
         assert_eq!(st.branch, "dev");
     }
@@ -323,7 +466,7 @@ mod tests {
                 "rev-list --left-right --count origin/feature-x...feature-x",
                 "0\t0",
             );
-        let st = evaluate(&g, d(), &ResolvedBase::unresolved());
+        let st = evaluate(&g, d(), &ResolvedBase::unresolved(), false);
         assert!(!st.correct_branch);
         assert!(!st.ok());
     }

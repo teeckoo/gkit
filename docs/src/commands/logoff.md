@@ -35,13 +35,30 @@ For each repo and submodule, all must pass:
 2. **all-commits-pushed** — no local commit is missing from a remote.
 3. **branches-have-remote** — every local branch has a remote counterpart.
 4. **not-behind-remote** — current branch isn't behind `origin/<branch>`.
-5. **correct-branch** — you're not sitting on the base/integration branch while
-   feature branches exist on the remote. The base is resolved from `--base-branch`
-   → `git config gkit.baseBranch` → a remote-tracking branch (`origin/main`, else
-   `origin/master`); `main`/`master` are always treated as integration branches
-   too. If **none** of those yield a base (e.g. a single-branch clone of a feature
-   branch), the base is **unresolved** and this check **fails** rather than passing
-   vacuously — `--verbose` prints why. Set `git config gkit.baseBranch <b>` to fix.
+5. **correct-branch** — are you parked on a *safe* branch? Shared preamble for both
+   rules: **detached HEAD** → fails (a risky resting state); on a **feature** branch
+   → passes (you're actively on your work). On an **integration** branch
+   (`base`/`main`/`master`), one of two **mutually exclusive** rules runs, selected
+   by `gkit.solo`:
+
+   - **team** (default, `gkit.solo` off) — fails only if a **local** branch has
+     commits **not merged into base** (your own unfinished work). Branches that exist
+     only on the remote (others' work, stale branches) are **ignored**, so cleanly
+     sitting on `main`/`dev` in a shared repo passes.
+   - **solo** (`gkit.solo` on) — fails if the **remote** has **any** feature branch.
+     For a solo developer every remote branch is yours, so a leftover one means
+     unfinished/uncleaned work. Set `git config gkit.solo true` (per repo) or
+     `git config --global gkit.solo true` (your default); `gkit clone` stamps it from
+     the conf's `solo` field.
+
+   The base is resolved from `--base-branch` → `git config gkit.baseBranch` → a
+   remote-tracking branch (`origin/main`, else `origin/master`); `main`/`master` are
+   always integration too. If **none** of those yield a base (e.g. a single-branch
+   clone of a feature branch), the base is **unresolved** and this check **fails**
+   rather than passing vacuously. Set `git config gkit.baseBranch <b>` to fix.
+
+   In `--verbose`, when the non-default **solo** rule is active a `branch-rule` line
+   states which rule ran and why; the default team rule prints nothing (no noise).
 
 ## Output
 
@@ -65,7 +82,14 @@ Default (one line per repo, post-order: submodules before their parent):
 The `base-branch` line shows the resolved base **and how it was derived** —
 `(from --base-branch)`, `(from git config gkit.baseBranch)`, or
 `(derived from remote origin/main)`. When it can't be resolved it reads
-`UNRESOLVED — …` and `correct-branch` is `false`.
+`UNRESOLVED — …` and `correct-branch` is `false`. When the **solo** rule is active a
+`branch-rule` line precedes `correct-branch`; the default team rule prints none:
+
+```text
+/path/repo	base-branch	dev (from git config gkit.baseBranch)
+/path/repo	branch-rule	solo (gkit.solo on) — flags any feature branch on the remote
+/path/repo	correct-branch	false
+```
 
 Greppable: `gkit logoff -v | grep -w false`, `… | awk -F'\t' '$NF=="false"'`.
 

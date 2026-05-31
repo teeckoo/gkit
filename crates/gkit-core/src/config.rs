@@ -108,6 +108,17 @@ pub fn resolve_base(git: &dyn Git, dir: &Path, cli_override: Option<&str>) -> Re
     ResolvedBase::unresolved()
 }
 
+/// Read `gkit.solo` (a bool) for a repo. Default `false` (team workflow) when
+/// unset or unparsable. When `true`, the correct-branch check additionally flags
+/// sitting on an integration branch while feature branches exist on the remote —
+/// meaningful for a solo developer where every remote branch is their own.
+/// Honors git's config layering: `--global` for a personal default, repo config
+/// to override. Stamped by `gkit clone` from the conf's `solo` field.
+pub fn resolve_solo(git: &dyn Git, dir: &Path) -> bool {
+    let o = git.run(dir, &["config", "--get", "--bool", "gkit.solo"]);
+    o.success && o.trimmed() == "true"
+}
+
 /// Current branch, or `None` if HEAD is detached (no symbolic ref).
 pub fn current_branch_opt(git: &dyn Git, dir: &Path) -> Option<String> {
     let o = git.run(dir, &["symbolic-ref", "--short", "HEAD"]);
@@ -217,6 +228,24 @@ mod tests {
         let r = resolve_base(&g, d(), None);
         assert_eq!(r.name, None);
         assert_eq!(r.source, BaseSource::Unresolved);
+    }
+
+    #[test]
+    fn resolve_solo_defaults_false_and_reads_bool() {
+        // unset / failing config -> false
+        assert!(!resolve_solo(
+            &FakeGit::new().fail("config --get --bool gkit.solo"),
+            d()
+        ));
+        // explicit true / false
+        assert!(resolve_solo(
+            &FakeGit::new().ok("config --get --bool gkit.solo", "true"),
+            d()
+        ));
+        assert!(!resolve_solo(
+            &FakeGit::new().ok("config --get --bool gkit.solo", "false"),
+            d()
+        ));
     }
 
     #[test]

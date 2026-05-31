@@ -106,7 +106,8 @@ pub fn evaluate_tree<G: Git + Sync>(
                     let _ = git.run(&path, &["remote", "prune", "origin"]);
                 }
                 let base = crate::config::resolve_base(git, &path, ovr);
-                checks::evaluate(git, &path, &base)
+                let solo = crate::config::resolve_solo(git, &path);
+                checks::evaluate(git, &path, &base, solo)
             });
             handles.push((i, handle));
         }
