@@ -314,13 +314,21 @@ fn logoff_recurses_submodule_postorder() {
     assert_eq!(o.code, 0, "fresh super+submodule should pass:\n{}", o.all());
 
     // Post-order: the submodule RESULT line comes before the superproject's.
-    let result_idx = |name: &str| {
-        o.stdout
-            .lines()
-            .position(|l| l.contains("\tRESULT\t") && l.split('\t').next().unwrap().ends_with(name))
+    // Match the path's last component (normalize `\` so it works on Windows too).
+    let result_idx = |last: &str| {
+        o.stdout.lines().position(|l| {
+            l.contains("\tRESULT\t")
+                && l.split('\t')
+                    .next()
+                    .unwrap()
+                    .replace('\\', "/")
+                    .rsplit('/')
+                    .next()
+                    == Some(last)
+        })
     };
-    let sub_i = result_idx("/sub").expect("submodule RESULT line");
-    let sup_i = result_idx("/work").expect("superproject RESULT line");
+    let sub_i = result_idx("sub").expect("submodule RESULT line");
+    let sup_i = result_idx("work").expect("superproject RESULT line");
     assert!(
         sub_i < sup_i,
         "submodule should be reported before superproject:\n{}",

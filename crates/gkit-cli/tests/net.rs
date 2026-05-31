@@ -233,7 +233,7 @@ fn net_logoff_submodule_recursion() {
     let o = logoff_v(&sup);
     assert_check(&o.stdout, &basic, "correct-branch", "false"); // detached
     assert!(
-        result_index(&o.stdout, "/basic") < result_index(&o.stdout, "/super"),
+        result_index(&o.stdout, "basic") < result_index(&o.stdout, "super"),
         "submodule should be reported before superproject:\n{}",
         o.stdout
     );
@@ -258,9 +258,19 @@ fn net_logoff_submodule_recursion() {
     );
 }
 
-/// Index of the `RESULT` line whose path ends with `suffix` (for post-order checks).
-fn result_index(out: &str, suffix: &str) -> usize {
+/// Index of the `RESULT` line whose path's last component is `last` (for post-order
+/// checks; normalizes `\` so it's Windows-safe).
+fn result_index(out: &str, last: &str) -> usize {
     out.lines()
-        .position(|l| l.contains("\tRESULT\t") && l.split('\t').next().unwrap().ends_with(suffix))
-        .unwrap_or_else(|| panic!("no RESULT line ending in {suffix}:\n{out}"))
+        .position(|l| {
+            l.contains("\tRESULT\t")
+                && l.split('\t')
+                    .next()
+                    .unwrap()
+                    .replace('\\', "/")
+                    .rsplit('/')
+                    .next()
+                    == Some(last)
+        })
+        .unwrap_or_else(|| panic!("no RESULT line with last component {last}:\n{out}"))
 }
