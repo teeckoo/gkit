@@ -77,8 +77,9 @@ anything**, naming the offending dir.
 1. global `pre-clone`
 2. repo `pre-clone`
 3. `git <git-flags> clone [--depth N] [--branch B --single-branch] --recurse-submodules <clone-flags> <repo clone-flags> <url> <dir>` — **printed**, output captured
-4. **built-ins** (unless disabled): git identity (`user.name`/`user.email`, if
-   resolved — **printed**), submodule init + branch-switch, `direnv allow`
+4. **built-ins** (unless disabled): git identity (`user.name`/`user.email` on the
+   repo **and recursively on every submodule**, if resolved — **printed**), submodule
+   init + branch-switch, `direnv allow`
 5. global `post-clone`
 6. repo `post-clone`
 
@@ -97,7 +98,8 @@ omitted — see [`gkit clone`](./commands/clone.md).
 Derived from each repo's own on-disk metadata — no config needed:
 
 - **git identity** → `git config user.name`/`user.email` when resolved from
-  `--user-name`/`--user-email` or the prompt (your input, not the conf). Printed.
+  `--user-name`/`--user-email` or the prompt (your input, not the conf), applied to
+  the repo **and every submodule** (`submodule foreach --recursive`). Printed.
 - **submodules** → `update --init --recursive`, then each switched onto its
   `.gitmodules` branch (no detached HEAD). Disable with `--no-submodule-branch`.
 - **`.envrc`** → `direnv allow` (trust-only; it does **not** evaluate the file, so an

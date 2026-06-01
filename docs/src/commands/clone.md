@@ -30,8 +30,9 @@ rest still run and the exit code is non-zero if anything failed.
 1. Build and **print** `git <git-flags> clone [tokens] --recurse-submodules
    <clone-flags> <-- flags> <url> <dir>`.
 2. Skip if the directory already exists; otherwise clone (output captured).
-3. **Git identity** → `git config user.name`/`user.email` (if resolved — see below;
-   printed, since the values are your explicit input).
+3. **Git identity** → `git config user.name`/`user.email` on the repo **and every
+   submodule** (recursive — a submodule is its own repo with its own config), if
+   resolved (see below; printed, since the values are your explicit input).
 4. **Submodules** → init + switch each onto its `.gitmodules` branch
    (`--no-submodule-branch` to skip).
 5. **`.envrc`** → `direnv allow` (trust-only, no evaluation; `--no-direnv` to skip).
@@ -49,6 +50,10 @@ Instead you supply it when you run the command:
 
 With **no flag and no terminal** (e.g. CI) the field is left unset, so the clone
 inherits your global git identity — the command never hangs waiting for input.
+
+The resolved identity is applied to the superproject **and recursively to every
+submodule** (each is a separate repo, so commits there use the same identity rather
+than your global one).
 
 The resolved values are also exported to hooks as `$GKIT_USER_NAME` /
 `$GKIT_USER_EMAIL` (empty when unset).
@@ -86,6 +91,7 @@ $ gkit clone repos.toml --user-name "Jane Dev" --user-email jane@example-org.com
 + git clone --branch dev --single-branch --recurse-submodules --filter=blob:none --no-tags tlbb:example-org/cosp.git /Users/you/work/cosp
 + git config user.name Jane Dev
 + git config user.email jane@example-org.com
++ git submodule foreach --recursive git config user.name 'Jane Dev'; git config user.email 'jane@example-org.com'
 + echo done $GKIT_REPO
 done cosp
 cloned   cosp     /Users/you/work/cosp

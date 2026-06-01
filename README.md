@@ -105,7 +105,8 @@ gkit stmb  ~/work/cp-conf    # done with a feature -> back to base, delete it, v
 Your `user.name`/`user.email` are **per-invocation, never in the (shared) conf**:
 pass `--user-name`/`--user-email`, or omit them and gkit prompts (defaulting to your
 current git identity). With no flags and no terminal it leaves the inherited identity
-alone — so it's safe in CI.
+alone — so it's safe in CI. When set, it's applied to the clone **and every submodule**
+(recursively), so commits in submodules use it too.
 
 ## Principles
 

@@ -59,6 +59,23 @@ impl Default for Opts {
 
 const SUBMODULE_SWITCH: &str = "b=$(git config -f \"$toplevel/.gitmodules\" \"submodule.$name.branch\" 2>/dev/null || echo main); git switch \"$b\" 2>/dev/null || true";
 
+/// Single-quote a value for safe interpolation into an `sh -c` command line
+/// (each embedded `'` becomes `'\''`).
+fn sh_squote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The `git submodule foreach --recursive` body that stamps the resolved identity
+/// into each submodule, values single-quoted for `sh`. `None` when no identity was
+/// given (so the caller skips the recursion entirely).
+fn submodule_identity_cmd(user_name: Option<&str>, user_email: Option<&str>) -> Option<String> {
+    let parts: Vec<String> = [("user.name", user_name), ("user.email", user_email)]
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|v| format!("git config {k} {}", sh_squote(v))))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
 /// Run hook commands via `sh -c` in `cwd` with `env` set; output inherited; each
 /// printed `+ <cmd>`. Stops at the first non-zero exit.
 fn run_hooks(cmds: &[String], cwd: &Path, env: &[(&str, &str)]) -> Result<(), String> {
@@ -174,18 +191,38 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
 
             // 4: built-ins. Identity first (printed; values are explicit user input)
             // so post-clone hooks and direnv see it; a failure fails the repo.
-            for (key, val) in [
+            let identity: Vec<(&str, &str)> = [
                 ("user.name", opts.user_name.as_deref()),
                 ("user.email", opts.user_email.as_deref()),
-            ] {
-                if let Some(v) = val {
-                    println!("+ git config {key} {v}");
-                    let out = git.run(&dir, &["config", key, v]);
-                    if !out.success {
-                        let e = format!("git config {key} failed: {}", out.stderr.trim());
-                        println!("FAILED   {name:<28} {e}");
-                        return mk(Outcome::Failed(e));
-                    }
+            ]
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v?)))
+            .collect();
+            // 4a: the superproject (args passed straight to git — no shell).
+            for (key, val) in &identity {
+                println!("+ git config {key} {val}");
+                let out = git.run(&dir, &["config", key, val]);
+                if !out.success {
+                    let e = format!("git config {key} failed: {}", out.stderr.trim());
+                    println!("FAILED   {name:<28} {e}");
+                    return mk(Outcome::Failed(e));
+                }
+            }
+            // 4b: the same identity into every submodule (recursive) so commits there
+            // use it too — a submodule is its own repo with its own config. Runs via
+            // `sh -c`, so the values are single-quoted.
+            if let Some(body) =
+                submodule_identity_cmd(opts.user_name.as_deref(), opts.user_email.as_deref())
+            {
+                println!("+ git submodule foreach --recursive {body}");
+                let out = git.run(
+                    &dir,
+                    &["submodule", "foreach", "--recursive", body.as_str()],
+                );
+                if !out.success {
+                    let e = format!("submodule identity failed: {}", out.stderr.trim());
+                    println!("FAILED   {name:<28} {e}");
+                    return mk(Outcome::Failed(e));
                 }
             }
             // remaining built-ins (captured)
@@ -220,7 +257,30 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
 
 #[cfg(test)]
 mod tests {
+    use super::{sh_squote, submodule_identity_cmd};
     use crate::conf;
+
+    #[test]
+    fn submodule_identity_cmd_quotes_and_skips() {
+        // both fields → two `git config`s, single-quoted, joined with `; `
+        assert_eq!(
+            submodule_identity_cmd(Some("Jane Dev"), Some("jane@acme.com")).as_deref(),
+            Some("git config user.name 'Jane Dev'; git config user.email 'jane@acme.com'")
+        );
+        // only one field set → just that one
+        assert_eq!(
+            submodule_identity_cmd(Some("Jane"), None).as_deref(),
+            Some("git config user.name 'Jane'")
+        );
+        // neither → None (caller skips the recursion)
+        assert_eq!(submodule_identity_cmd(None, None), None);
+        // an embedded single quote is escaped so `sh` can't break out
+        assert_eq!(
+            submodule_identity_cmd(Some("O'Brien"), None).as_deref(),
+            Some(r"git config user.name 'O'\''Brien'")
+        );
+        assert_eq!(sh_squote("a b"), "'a b'");
+    }
 
     #[test]
     fn builds_expected_url_shape() {
