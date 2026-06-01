@@ -77,19 +77,27 @@ anything**, naming the offending dir.
 1. global `pre-clone`
 2. repo `pre-clone`
 3. `git <git-flags> clone [--depth N] [--branch B --single-branch] --recurse-submodules <clone-flags> <repo clone-flags> <url> <dir>` — **printed**, output captured
-4. **built-ins** (unless disabled): submodule init + branch-switch, `direnv allow`
+4. **built-ins** (unless disabled): git identity (`user.name`/`user.email`, if
+   resolved — **printed**), submodule init + branch-switch, `direnv allow`
 5. global `post-clone`
 6. repo `post-clone`
 
 Hooks run via `sh -c`, output shown live, with `$GKIT_REPO`, `$GKIT_DIR`,
-`$GKIT_URL`, `$GKIT_HOST`, `$GKIT_NAMESPACE` set (pre runs in the parent of the
-target dir; post runs inside the cloned repo). A hook that exits non-zero fails
-that repo.
+`$GKIT_URL`, `$GKIT_HOST`, `$GKIT_NAMESPACE` set — plus `$GKIT_USER_NAME` /
+`$GKIT_USER_EMAIL` (the resolved identity, empty when unset). Pre runs in the
+parent of the target dir; post runs inside the cloned repo. A hook that exits
+non-zero fails that repo.
+
+Git identity is **not** a conf key (the conf is shared across a team): it comes
+from the `clone` `--user-name`/`--user-email` flags, or an interactive prompt when
+omitted — see [`gkit clone`](./commands/clone.md).
 
 ## Built-in, stateless post-clone
 
 Derived from each repo's own on-disk metadata — no config needed:
 
+- **git identity** → `git config user.name`/`user.email` when resolved from
+  `--user-name`/`--user-email` or the prompt (your input, not the conf). Printed.
 - **submodules** → `update --init --recursive`, then each switched onto its
   `.gitmodules` branch (no detached HEAD). Disable with `--no-submodule-branch`.
 - **`.envrc`** → `direnv allow` (trust-only; it does **not** evaluate the file, so an

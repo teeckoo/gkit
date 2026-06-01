@@ -101,6 +101,14 @@ struct CloneArgs {
     /// Don't `direnv allow` cloned repos that have an .envrc.
     #[arg(long)]
     no_direnv: bool,
+    /// `git config user.name` to stamp on each cloned repo (your identity, NOT the
+    /// shared conf's). Omitted in a terminal → prompted; omitted in a non-terminal
+    /// → left to your inherited git identity.
+    #[arg(long)]
+    user_name: Option<String>,
+    /// `git config user.email` to stamp on each cloned repo (see `--user-name`).
+    #[arg(long)]
+    user_email: Option<String>,
 }
 
 /// Resolve explicit conf-file arguments to a de-duplicated list. At least one is
@@ -131,9 +139,21 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
         Ok(c) => c,
         Err(e) => return die(&e),
     };
+    // Identity is the invoking developer's, never the shared conf's: a flag wins,
+    // else (in a terminal) prompt with the current git identity as the default,
+    // else leave it unset (inherit). Resolved once for the whole invocation.
+    let interactive = std::io::stdin().is_terminal();
+    let user_name = resolve_identity(args.user_name, interactive, || {
+        prompt_identity("git user.name", git_config_global("user.name"))
+    });
+    let user_email = resolve_identity(args.user_email, interactive, || {
+        prompt_identity("git user.email", git_config_global("user.email"))
+    });
     let opts = clone::Opts {
         submodule_branch: !args.no_submodule_branch,
         direnv: !args.no_direnv,
+        user_name,
+        user_email,
     };
 
     let mut failed = false;
@@ -749,6 +769,50 @@ fn read_line(label: &str) -> Option<String> {
     }
 }
 
+/// Resolve the git identity to stamp on cloned repos: an explicit flag wins; else,
+/// only when interactive, run `prompt`; else `None` (leave the inherited identity
+/// untouched — so a non-interactive run without the flag never hangs).
+fn resolve_identity(
+    flag: Option<String>,
+    interactive: bool,
+    prompt: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    match flag {
+        Some(v) => Some(v),
+        None if interactive => prompt(),
+        None => None,
+    }
+}
+
+/// The current global git identity field (e.g. `user.name`), if set — used to
+/// prefill the clone prompt so a bare Enter keeps it. Empty/unset → `None`.
+fn git_config_global(key: &str) -> Option<String> {
+    let out = SystemGit.run(Path::new("."), &["config", "--global", key]);
+    let v = out.trimmed();
+    (out.success && !v.is_empty()).then(|| v.to_string())
+}
+
+/// Prompt for an identity value, showing `default` (the current git config) in
+/// brackets. Enter (or EOF) keeps the default; a typed value overrides; empty input
+/// with no default → `None` (skip stamping that field).
+fn prompt_identity(label: &str, default: Option<String>) -> Option<String> {
+    match &default {
+        Some(d) => print!("{label} [{d}]: "),
+        None => print!("{label}: "),
+    }
+    let _ = std::io::stdout().flush();
+    let mut s = String::new();
+    if std::io::stdin().read_line(&mut s).unwrap_or(0) == 0 {
+        return default; // EOF — keep the default
+    }
+    let t = s.trim();
+    if t.is_empty() {
+        default
+    } else {
+        Some(t.to_string())
+    }
+}
+
 /// Show the provider menu and return the chosen hostname. Standard options are
 /// numbered, with a final "other" entry for a custom/private hostname; a bare
 /// Enter takes the default. Re-asks on an out-of-range number.
@@ -786,9 +850,33 @@ fn die(msg: &str) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_confs;
+    use super::{resolve_confs, resolve_identity};
     use std::fs;
     use std::path::PathBuf;
+
+    // Identity resolution for `clone`: a flag always wins; with no flag we prompt
+    // only when interactive; a non-interactive run with no flag yields `None`
+    // (inherit) rather than calling the prompt (which would hang).
+    #[test]
+    fn resolve_identity_flag_prompt_or_none() {
+        // flag set → used verbatim, prompt never runs (even non-interactive)
+        assert_eq!(
+            resolve_identity(Some("Jane".into()), false, || panic!("must not prompt")),
+            Some("Jane".to_string())
+        );
+        // no flag + interactive → the prompt result is taken
+        assert_eq!(
+            resolve_identity(None, true, || Some("Prompted".into())),
+            Some("Prompted".to_string())
+        );
+        // no flag + interactive, prompt skipped (empty) → None
+        assert_eq!(resolve_identity(None, true, || None), None);
+        // no flag + NOT interactive → None, prompt never runs (no hang)
+        assert_eq!(
+            resolve_identity(None, false, || panic!("must not prompt")),
+            None
+        );
+    }
 
     // `clone` and `logoff --conf` accept ONLY explicit conf file(s): at least one
     // is required, a directory is rejected (use a `*.toml` shell glob instead), and

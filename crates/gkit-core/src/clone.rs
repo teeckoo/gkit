@@ -2,13 +2,19 @@
 //! pre/post-clone hooks.
 //!
 //! Per repo, in order: global `pre-clone` → repo `pre-clone` → `git <PRE> clone
-//! <POST> <url> <dir>` → built-ins (submodule branch-switch + `direnv allow`) →
-//! global `post-clone` → repo `post-clone`.
+//! <POST> <url> <dir>` → built-ins (git identity + submodule branch-switch +
+//! `direnv allow`) → global `post-clone` → repo `post-clone`.
+//!
+//! Git identity (`user.name`/`user.email`) is **per-invocation, not in the conf**
+//! (the conf is shared across a team): it comes from `Opts` (the `clone`
+//! `--user-name`/`--user-email` flags, or an interactive prompt), and is stamped
+//! `git config` on each cloned repo right after clone so `post-clone` hooks see it.
 //!
 //! The `git clone` and built-ins are **captured** (clean status; an `.envrc` that
 //! runs `glow …` can't distort output — `direnv allow` only records trust). User
 //! hooks run via `sh -c` with their output **inherited** (explicit commands, shown
-//! live) and `$GKIT_REPO`/`GKIT_DIR`/`GKIT_URL`/`GKIT_HOST`/`GKIT_NAMESPACE` set.
+//! live) and `$GKIT_REPO`/`GKIT_DIR`/`GKIT_URL`/`GKIT_HOST`/`GKIT_NAMESPACE` set
+//! (plus `GKIT_USER_NAME`/`GKIT_USER_EMAIL`, empty when no identity was given).
 
 use crate::conf::{expand_path, CloneConf};
 use crate::git::Git;
@@ -33,6 +39,11 @@ pub struct CloneReport {
 pub struct Opts {
     pub submodule_branch: bool,
     pub direnv: bool,
+    /// Git identity stamped on each cloned repo (`git config user.name`). Per
+    /// invocation, not from the conf — `None` leaves the repo's inherited identity.
+    pub user_name: Option<String>,
+    /// Git identity stamped on each cloned repo (`git config user.email`).
+    pub user_email: Option<String>,
 }
 
 impl Default for Opts {
@@ -40,6 +51,8 @@ impl Default for Opts {
         Self {
             submodule_branch: true,
             direnv: true,
+            user_name: None,
+            user_email: None,
         }
     }
 }
@@ -130,6 +143,8 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
                 ("GKIT_URL", url.as_str()),
                 ("GKIT_HOST", conf.host.as_str()),
                 ("GKIT_NAMESPACE", ns.as_str()),
+                ("GKIT_USER_NAME", opts.user_name.as_deref().unwrap_or("")),
+                ("GKIT_USER_EMAIL", opts.user_email.as_deref().unwrap_or("")),
             ];
 
             // 1+2: pre-clone hooks (cwd = parent of target; create it first)
@@ -157,7 +172,23 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
                 return mk(Outcome::Failed(e));
             }
 
-            // 4: built-ins (captured)
+            // 4: built-ins. Identity first (printed; values are explicit user input)
+            // so post-clone hooks and direnv see it; a failure fails the repo.
+            for (key, val) in [
+                ("user.name", opts.user_name.as_deref()),
+                ("user.email", opts.user_email.as_deref()),
+            ] {
+                if let Some(v) = val {
+                    println!("+ git config {key} {v}");
+                    let out = git.run(&dir, &["config", key, v]);
+                    if !out.success {
+                        let e = format!("git config {key} failed: {}", out.stderr.trim());
+                        println!("FAILED   {name:<28} {e}");
+                        return mk(Outcome::Failed(e));
+                    }
+                }
+            }
+            // remaining built-ins (captured)
             if opts.submodule_branch {
                 let _ = git.run(
                     &dir,

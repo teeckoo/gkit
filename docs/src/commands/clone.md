@@ -7,7 +7,7 @@ command is printed (transparency); all subprocess output is captured so a noisy
 ## Synopsis
 
 ```sh
-gkit clone <conf…> [--no-submodule-branch] [--no-direnv]
+gkit clone <conf…> [--user-name <n>] [--user-email <e>] [--no-submodule-branch] [--no-direnv]
 ```
 
 `conf…` are **explicit conf file(s)** — at least one is required, and a directory
@@ -30,14 +30,35 @@ rest still run and the exit code is non-zero if anything failed.
 1. Build and **print** `git <git-flags> clone [tokens] --recurse-submodules
    <clone-flags> <-- flags> <url> <dir>`.
 2. Skip if the directory already exists; otherwise clone (output captured).
-3. **Submodules** → init + switch each onto its `.gitmodules` branch
+3. **Git identity** → `git config user.name`/`user.email` (if resolved — see below;
+   printed, since the values are your explicit input).
+4. **Submodules** → init + switch each onto its `.gitmodules` branch
    (`--no-submodule-branch` to skip).
-4. **`.envrc`** → `direnv allow` (trust-only, no evaluation; `--no-direnv` to skip).
+5. **`.envrc`** → `direnv allow` (trust-only, no evaluation; `--no-direnv` to skip).
+
+## Git identity (`--user-name` / `--user-email`)
+
+Identity is **per-invocation, never in the conf** — the conf is shared across a
+team, so writing one person's name/email into it would stamp *everyone's* clones.
+Instead you supply it when you run the command:
+
+- pass `--user-name` / `--user-email`, **or**
+- omit them and gkit prompts (in a terminal), defaulting to your current
+  `git config user.name`/`user.email` (Enter keeps the default; empty with no
+  default skips that field).
+
+With **no flag and no terminal** (e.g. CI) the field is left unset, so the clone
+inherits your global git identity — the command never hangs waiting for input.
+
+The resolved values are also exported to hooks as `$GKIT_USER_NAME` /
+`$GKIT_USER_EMAIL` (empty when unset).
 
 ## Flags
 
 | Flag | Effect |
 |---|---|
+| `--user-name <n>` | `git config user.name` to stamp on each cloned repo (prompted if omitted in a terminal). |
+| `--user-email <e>` | `git config user.email` to stamp on each cloned repo (prompted if omitted in a terminal). |
 | `--no-submodule-branch` | Leave submodules detached (don't switch to their branch). |
 | `--no-direnv` | Don't `direnv allow` repos that have an `.envrc`. |
 
@@ -61,8 +82,10 @@ post-clone  = ["echo done $GKIT_REPO"]
 ```
 
 ```text
-$ gkit clone repos.toml
+$ gkit clone repos.toml --user-name "Jane Dev" --user-email jane@example-org.com
 + git clone --branch dev --single-branch --recurse-submodules --filter=blob:none --no-tags tlbb:example-org/cosp.git /Users/you/work/cosp
++ git config user.name Jane Dev
++ git config user.email jane@example-org.com
 + echo done $GKIT_REPO
 done cosp
 cloned   cosp     /Users/you/work/cosp

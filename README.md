@@ -52,7 +52,7 @@ cargo install --git https://github.com/teeckoo/gkit gkit
 | Command | What it does |
 |---|---|
 | `gkit init [file]` | Scaffold a starter clone conf in the cwd (`host`/`namespace` inferred from `origin` when possible). |
-| `gkit clone <conf…>` | Clone repos from the given conf file(s) (`repos.toml`, or `*.toml` for a whole dir — a directory arg isn't accepted); submodules switched onto their branch, `.envrc` trusted, every command printed. |
+| `gkit clone <conf…>` | Clone repos from the given conf file(s) (`repos.toml`, or `*.toml` for a whole dir — a directory arg isn't accepted); submodules switched onto their branch, `.envrc` trusted, every command printed. `--user-name`/`--user-email` (or a prompt) stamp your git identity on each clone. |
 | `gkit logoff [path…]` | Is every repo **+ submodule** committed and pushed? Exit 0 = all clear. `-v` for a greppable per-check breakdown (`-vv` adds why each failing check failed; `-e` lists the rules); **`--conf <conf…>`** to check every repo in your clone conf(s). |
 | `gkit stmb [path]` | "Switch to main branch": return to the base branch, update it, and **safe-delete** the finished feature branch — recursively across submodules. |
 
@@ -96,9 +96,16 @@ repo must resolve a namespace or `gkit clone` errors before cloning anything.
 ```sh
 gkit clone repos.toml        # clones missing repos (prints each git command)
 # or `gkit clone *.toml` (every conf in the cwd, via shell glob)
+# stamp your git identity on each clone (prompted if you omit the flags):
+gkit clone repos.toml --user-name "Jane Dev" --user-email jane@acme.com
 gkit logoff ~/work           # gate: everything committed & pushed? (recurses submodules)
 gkit stmb  ~/work/cp-conf    # done with a feature -> back to base, delete it, verify
 ```
+
+Your `user.name`/`user.email` are **per-invocation, never in the (shared) conf**:
+pass `--user-name`/`--user-email`, or omit them and gkit prompts (defaulting to your
+current git identity). With no flags and no terminal it leaves the inherited identity
+alone — so it's safe in CI.
 
 ## Principles
 
