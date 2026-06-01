@@ -66,6 +66,15 @@ fn logoff_v(work: &Path) -> Out {
     )
 }
 
+/// `-vv`: adds the `base-branch` + `branch-rule` metadata lines and `R<n>` prefixes
+/// (so the correct-branch key reads `R5 correct-branch`).
+fn logoff_vv(work: &Path) -> Out {
+    gkit(
+        work,
+        &["logoff", "-vv", "--no-fetch", work.to_str().unwrap()],
+    )
+}
+
 #[test]
 fn net_logoff_scenarios_no_submodules() {
     if !gated() {
@@ -80,19 +89,21 @@ fn net_logoff_scenarios_no_submodules() {
     assert_check(&o.stdout, &work, "committed", "true");
     assert_check(&o.stdout, &work, "all-commits-pushed", "true");
     assert_check(&o.stdout, &work, "branches-have-remote", "true");
+    assert_check(&o.stdout, &work, "correct-branch", "true");
+    assert!(
+        !o.stdout.contains("branch-rule") && !o.stdout.contains("base-branch"),
+        "the -v scan carries no metadata lines:\n{}",
+        o.stdout
+    );
+    assert_eq!(o.code, 0, "pristine clone should pass:\n{}", o.all());
+    // base-branch is a -vv metadata line.
+    let ovv = logoff_vv(&work);
     assert_check(
-        &o.stdout,
+        &ovv.stdout,
         &work,
         "base-branch",
         "master (derived from remote origin/master)",
     );
-    assert_check(&o.stdout, &work, "correct-branch", "true");
-    assert!(
-        !o.stdout.contains("branch-rule"),
-        "team rule is silent:\n{}",
-        o.stdout
-    );
-    assert_eq!(o.code, 0, "pristine clone should pass:\n{}", o.all());
 
     // 2. Uncommitted change -> committed false.
     pristine(&work);
@@ -141,7 +152,7 @@ fn net_logoff_scenarios_no_submodules() {
     // 7. base-branch from git config.
     pristine(&work);
     git_ok(&work, &["config", "gkit.baseBranch", "dev"]);
-    let o = logoff_v(&work);
+    let o = logoff_vv(&work);
     assert_check(
         &o.stdout,
         &work,
@@ -153,14 +164,14 @@ fn net_logoff_scenarios_no_submodules() {
     //    `octocat-patch-1`), so on `master` the solo rule FAILS where team passes.
     pristine(&work);
     git_ok(&work, &["config", "gkit.solo", "true"]);
-    let o = logoff_v(&work);
+    let o = logoff_vv(&work);
     assert_check(
         &o.stdout,
         &work,
         "branch-rule",
         "solo (gkit.solo on) — flags any feature branch on the remote",
     );
-    assert_check(&o.stdout, &work, "correct-branch", "false");
+    assert_check(&o.stdout, &work, "R5 correct-branch", "false");
     assert_eq!(
         o.code,
         1,

@@ -7,8 +7,10 @@ Recursive into submodules; output is deterministic and greppable.
 ## Synopsis
 
 ```sh
-gkit logoff [path…] [--verbose] [--no-fetch] [--base-branch <b>]
+gkit logoff [path…] [-v|-vv] [--no-fetch] [--base-branch <b>]
 gkit logoff --conf <conf…>      # check every repo listed in the conf(s)
+gkit logoff -e                  # explain: print the static rule catalog
+gkit logoff -e <N> [path]       # explain rule R<N> in depth, with this repo's live state
 ```
 
 - `gkit logoff` — the repo at the current directory.
@@ -29,13 +31,14 @@ or any conf fails to parse.
 
 ## The five checks
 
-For each repo and submodule, all must pass:
+For each repo and submodule, all must pass. Each rule has a stable id (`R1`..`R5`),
+shown as a line prefix at `-vv` and looked up with [`-e`](#explaining-the-rules):
 
-1. **committed** — `git status -s` is empty.
-2. **all-commits-pushed** — no local commit is missing from a remote.
-3. **branches-have-remote** — every local branch has a remote counterpart.
-4. **not-behind-remote** — current branch isn't behind `origin/<branch>`.
-5. **correct-branch** — are you parked on a *safe* branch? Shared preamble for both
+1. **R1 committed** — `git status -s` is empty.
+2. **R2 all-commits-pushed** — no local commit is missing from a remote.
+3. **R3 branches-have-remote** — every local branch has a remote counterpart.
+4. **R4 not-behind-remote** — current branch isn't behind `origin/<branch>`.
+5. **R5 correct-branch** — are you parked on a *safe* branch? Shared preamble for both
    rules: **detached HEAD** → fails (a risky resting state); on a **feature** branch
    → passes (you're actively on your work). On an **integration** branch
    (`base`/`main`/`master`), one of two **mutually exclusive** rules runs, selected
@@ -56,8 +59,8 @@ For each repo and submodule, all must pass:
    clone of a feature branch), the base is **unresolved** and this check **fails**
    rather than passing vacuously. Set `git config gkit.baseBranch <b>` to fix.
 
-   In `--verbose`, when the non-default **solo** rule is active a `branch-rule` line
-   states which rule ran and why; the default team rule prints nothing (no noise).
+   The active rule is surfaced on a `branch-rule` line at `-vv` (always, team or
+   solo); the bare `-v` scan and the default output print nothing about it.
 
 ## Output
 
@@ -68,29 +71,81 @@ Default (one line per repo, post-order: submodules before their parent):
 /path/repo               dev false
 ```
 
-`--verbose` — one fact per line, path-first, tab-separated, fixed order:
+`-v` — a pure pass/fail **scan**: one fact per line, path-first, tab-separated,
+fixed order. Just the five checks + `RESULT` (no contextual metadata):
 
 ```text
 /path/repo	committed	true
 /path/repo	all-commits-pushed	false
-/path/repo	base-branch	dev (from git config gkit.baseBranch)
+/path/repo	branches-have-remote	true
+/path/repo	not-behind-remote	true
 /path/repo	correct-branch	true
 /path/repo	RESULT	dev	false
 ```
 
-The `base-branch` line shows the resolved base **and how it was derived** —
-`(from --base-branch)`, `(from git config gkit.baseBranch)`, or
-`(derived from remote origin/main)`. When it can't be resolved it reads
-`UNRESOLVED — …` and `correct-branch` is `false`. When the **solo** rule is active a
-`branch-rule` line precedes `correct-branch`; the default team rule prints none:
+Greppable: `gkit logoff -v | grep -w false`, `… | awk -F'\t' '$NF=="false"'`.
+
+`-vv` is `-v` plus **context + why**: each check line gains its `R<n>` rule id; the
+`base-branch` and `branch-rule` metadata lines appear (only here, not at `-v`); and
+every **failing** check is followed by an `R<n> reason` line (R5 names the offending
+branch). Passing checks get no reason line:
 
 ```text
+/path/repo	R1 committed	true
+/path/repo	R4 not-behind-remote	true
 /path/repo	base-branch	dev (from git config gkit.baseBranch)
-/path/repo	branch-rule	solo (gkit.solo on) — flags any feature branch on the remote
-/path/repo	correct-branch	false
+/path/repo	branch-rule	team (gkit.solo off) — flags a local branch unmerged into base
+/path/repo	R5 correct-branch	false
+/path/repo	R5 reason	local branch 'feat-x' is not merged into base (team rule: your unfinished work)
 ```
 
-Greppable: `gkit logoff -v | grep -w false`, `… | awk -F'\t' '$NF=="false"'`.
+The `base-branch` line shows the resolved base **and how it was derived** —
+`(from --base-branch)`, `(from git config gkit.baseBranch)`, or
+`(derived from remote origin/main)`; when it can't be resolved it reads
+`UNRESOLVED — …` and `correct-branch` is `false`.
+
+## Explaining the rules
+
+Two forms, both exit `0` (informational, never the gate):
+
+**Bare `-e`** — the static rule catalog (one line per rule: id, key, description).
+Read-only; ignores paths and never touches git:
+
+```sh
+gkit logoff -e      # R1..R5, one per line
+```
+
+**`-e <N>`** — a **repo-aware deep dive** on one rule: what it checks, *this repo's*
+live state (actual branch values, the resolved base, the active rule, the failing
+verdict), and a few teaching examples. Reads a **single** repo — the cwd, or the
+path you give — with no submodule recursion and no fetch. The natural follow-up
+when `-vv` flags a rule and you want the full picture:
+
+```text
+$ gkit logoff -e 5
+
+R5  correct-branch    [this repo: FAIL]
+
+  What it checks
+    parked on a safe branch: a feature branch always passes; on an
+    integration branch the team rule (default) flags a local branch unmerged
+    into base, …
+
+  This repo now
+    branch          main
+    base            main (derived from remote origin/main)
+    rule            team (gkit.solo off) — flags a local branch unmerged into base
+    local branches  feat-x, main
+    verdict         FAIL — local branch 'feat-x' is not merged into base …
+
+  Examples
+    on a feature branch                      PASS (actively on your work)
+    on base/main, all local branches merged  PASS (parked clean)
+    on base/main, local 'wip' unmerged       FAIL (team: unfinished work)
+    detached HEAD                            FAIL (risky resting state)
+```
+
+An out-of-range rule number (not `1`..`5`) errors with a non-zero exit.
 
 A path that **isn't a git repository** (or doesn't exist) **fails the gate** rather
 than passing — the reason is shown where the branch would be, so the line still
@@ -108,7 +163,8 @@ reads as "nothing pending".)
 
 | Flag | Effect |
 |---|---|
-| `-v, --verbose` | Per-check breakdown (greppable). |
+| `-v` | Per-check breakdown (greppable). Repeat (`-vv`) to add `R<n>` rule ids and a `reason` line for each failing check. |
+| `-e` | Explain (exits 0). Bare = static rule catalog (no repo). `-e <N>` = repo-aware deep dive on rule R`N`: what it checks + this repo's live state + examples (single repo: cwd or the given path). |
 | `--no-fetch` | Don't fetch submodules first (faster / offline). |
 | `--base-branch <b>` | Override the base branch (root repo only). |
 

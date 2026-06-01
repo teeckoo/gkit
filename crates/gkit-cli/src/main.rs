@@ -192,9 +192,16 @@ struct LogoffArgs {
     /// accepted.
     #[arg(long)]
     conf: bool,
-    /// Per-check breakdown (one fact per line, path-first, greppable).
-    #[arg(short, long)]
-    verbose: bool,
+    /// Per-check breakdown (one fact per line, path-first, greppable). Repeat
+    /// (`-vv`) to also print an `R<n>` rule id on each line and a `reason` line for
+    /// every failing check (R5 names the offending branch).
+    #[arg(short = 'v', action = clap::ArgAction::Count)]
+    verbose: u8,
+    /// Explain the rules and exit 0. Bare `-e` prints the static rule catalog (no
+    /// repo). `-e <N>` is a repo-aware deep dive on rule R<N>: what it checks, this
+    /// repo's live state, and examples (single repo — cwd or the given path).
+    #[arg(short = 'e', value_name = "RULE")]
+    explain: Option<Option<u8>>,
     /// Skip fetching submodules before checking (faster / offline).
     #[arg(long)]
     no_fetch: bool,
@@ -205,6 +212,29 @@ struct LogoffArgs {
 }
 
 fn logoff_cmd(args: LogoffArgs) -> ExitCode {
+    // `-e` explains the rules and exits 0 (informational, not a gate). Bare `-e`
+    // is a static catalog (no repo); `-e <N>` is a repo-aware deep dive for one
+    // rule on a SINGLE repo (cwd, or the first path arg) — no recursion, no fetch.
+    if let Some(which) = args.explain {
+        match which {
+            None => {
+                report::print_rules();
+                return ExitCode::SUCCESS;
+            }
+            Some(n) => {
+                let Some(rule) = checks::RuleId::from_num(n) else {
+                    return die(&format!("-e: no such rule {n} (valid rules are R1..R5)"));
+                };
+                let git = SystemGit;
+                let dir = canonical(args.paths.first().map(String::as_str).unwrap_or("."));
+                let base = config::resolve_base(&git, &dir, args.base_branch.as_deref());
+                let solo = config::resolve_solo(&git, &dir);
+                report::print_rule_detail(&checks::rule_report(&git, &dir, &base, solo, rule));
+                return ExitCode::SUCCESS;
+            }
+        }
+    }
+
     let git = SystemGit;
     let mut failed = false;
 
@@ -253,8 +283,9 @@ fn logoff_cmd(args: LogoffArgs) -> ExitCode {
             args.base_branch.as_deref()
         };
         let entries = submodules::evaluate_tree(&git, dir, base, !args.no_fetch);
-        if args.verbose {
-            report::print_verbose(&entries);
+        if args.verbose >= 1 {
+            // -vv (>=2) adds R<n> prefixes + per-failure reason lines.
+            report::print_verbose(&entries, args.verbose >= 2);
         } else {
             report::print_default(&entries);
         }

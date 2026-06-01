@@ -52,7 +52,8 @@ gkit logoff ~/work/cp-conf
 ```
 
 Exit code `0` means every repo and submodule is committed **and** pushed. Add
-`--verbose` for a per-check breakdown you can `grep`.
+`-v` for a per-check breakdown you can `grep`, or `-vv` to also print why each
+failing check failed. `gkit logoff -e` lists the numbered rules.
 
 ## 4. Done with a feature branch?
 

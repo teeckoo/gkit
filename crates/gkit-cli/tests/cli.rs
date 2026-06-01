@@ -93,9 +93,10 @@ fn logoff_missing_dir_fails() {
 fn base_from_git_config() {
     let r = repo_with_remote("baseconfig", "main");
     git_ok(&r.work, &["config", "gkit.baseBranch", "dev"]);
+    // base-branch metadata is a -vv line now (-v is a pure pass/fail scan).
     let o = gkit(
         &r.work,
-        &["logoff", "-v", "--no-fetch", r.work.to_str().unwrap()],
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
     );
     assert_check(
         &o.stdout,
@@ -110,7 +111,7 @@ fn base_from_remote_main() {
     let r = repo_with_remote("basemain", "main");
     let o = gkit(
         &r.work,
-        &["logoff", "-v", "--no-fetch", r.work.to_str().unwrap()],
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
     );
     assert_check(
         &o.stdout,
@@ -125,7 +126,7 @@ fn base_from_remote_master() {
     let r = repo_with_remote("basemaster", "master");
     let o = gkit(
         &r.work,
-        &["logoff", "-v", "--no-fetch", r.work.to_str().unwrap()],
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
     );
     assert_check(
         &o.stdout,
@@ -141,7 +142,7 @@ fn base_unresolved_fails() {
     let r = repo_with_remote("basenone", "trunk");
     let o = gkit(
         &r.work,
-        &["logoff", "-v", "--no-fetch", r.work.to_str().unwrap()],
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
     );
     assert!(
         o.stdout
@@ -150,7 +151,7 @@ fn base_unresolved_fails() {
         "expected UNRESOLVED base-branch:\n{}",
         o.stdout
     );
-    assert_check(&o.stdout, &r.work, "correct-branch", "false");
+    assert_check(&o.stdout, &r.work, "R5 correct-branch", "false");
     assert_eq!(o.code, 1);
 }
 
@@ -161,7 +162,7 @@ fn base_branch_flag_override() {
         &r.work,
         &[
             "logoff",
-            "-v",
+            "-vv",
             "--no-fetch",
             "--base-branch",
             "custombase",
@@ -258,18 +259,18 @@ fn solo_flags_remote_feature_branch() {
     let r = repo_with_remote("solo-on", "main");
     push_then_drop_local_feature(&r.work, "bob-y");
     git_ok(&r.work, &["config", "gkit.solo", "true"]);
+    // branch-rule is a -vv metadata line now; the gate still fails at any level.
     let o = gkit(
         &r.work,
-        &["logoff", "-v", "--no-fetch", r.work.to_str().unwrap()],
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
     );
-    // Verbose explains the active (non-default) rule on its own line.
     assert_check(
         &o.stdout,
         &r.work,
         "branch-rule",
         "solo (gkit.solo on) — flags any feature branch on the remote",
     );
-    assert_check(&o.stdout, &r.work, "correct-branch", "false");
+    assert_check(&o.stdout, &r.work, "R5 correct-branch", "false");
     assert_eq!(o.code, 1);
 }
 
@@ -279,7 +280,7 @@ fn solo_passes_when_remote_is_integration_only() {
     git_ok(&r.work, &["config", "gkit.solo", "true"]);
     let o = gkit(
         &r.work,
-        &["logoff", "-v", "--no-fetch", r.work.to_str().unwrap()],
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
     );
     assert_check(
         &o.stdout,
@@ -287,13 +288,123 @@ fn solo_passes_when_remote_is_integration_only() {
         "branch-rule",
         "solo (gkit.solo on) — flags any feature branch on the remote",
     );
-    assert_check(&o.stdout, &r.work, "correct-branch", "true");
+    assert_check(&o.stdout, &r.work, "R5 correct-branch", "true");
     assert_eq!(
         o.code,
         0,
         "solo + integration-only remote should pass:\n{}",
         o.all()
     );
+}
+
+// ---------------------------------------------------------------- -vv reasons + -e
+
+#[test]
+fn vv_explains_why_correct_branch_failed() {
+    // On main with a LOCAL feature branch unmerged into main (team rule fail).
+    // -vv must name the offending branch in an `R5 reason` line.
+    let r = repo_with_remote("vv-localunmerged", "main");
+    git_ok(&r.work, &["checkout", "-b", "feature-y"]);
+    std::fs::write(r.work.join("y.txt"), "x\n").unwrap();
+    git_ok(&r.work, &["add", "."]);
+    git_ok(&r.work, &["commit", "-m", "unmerged"]);
+    git_ok(&r.work, &["push", "-u", "origin", "feature-y"]);
+    git_ok(&r.work, &["checkout", "main"]);
+    let o = gkit(
+        &r.work,
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
+    );
+    // The check line carries the R5 rule id...
+    assert_check(&o.stdout, &r.work, "R5 correct-branch", "false");
+    // ...and a reason line names the branch.
+    assert_contains(&o.stdout, "R5 reason");
+    assert_contains(&o.stdout, "feature-y");
+    assert_eq!(o.code, 1);
+}
+
+#[test]
+fn vv_clean_repo_has_no_reason_lines() {
+    // -vv on a passing repo: every check gets an R<n> prefix, but no reason lines
+    // (reasons appear only for failures).
+    let r = repo_with_remote("vv-clean", "main");
+    let o = gkit(
+        &r.work,
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
+    );
+    assert_check(&o.stdout, &r.work, "R1 committed", "true");
+    assert_check(&o.stdout, &r.work, "R5 correct-branch", "true");
+    assert!(
+        !o.stdout.contains("reason"),
+        "a clean repo should have no reason lines:\n{}",
+        o.stdout
+    );
+    assert_eq!(o.code, 0, "clean repo should pass:\n{}", o.all());
+}
+
+#[test]
+fn v_single_is_a_pure_scan() {
+    // -v is the bare pass/fail scan: no R<n> prefixes, no reasons, and no
+    // contextual metadata (base-branch / branch-rule moved to -vv).
+    let r = repo_with_remote("v-plain", "main");
+    let o = gkit(
+        &r.work,
+        &["logoff", "-v", "--no-fetch", r.work.to_str().unwrap()],
+    );
+    assert_check(&o.stdout, &r.work, "committed", "true");
+    assert!(
+        !o.stdout.contains("R1 ")
+            && !o.stdout.contains("reason")
+            && !o.stdout.contains("base-branch")
+            && !o.stdout.contains("branch-rule"),
+        "-v must be a pure scan (no ids, reasons, or metadata):\n{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn explain_lists_all_rules() {
+    let d = temp_dir("explain-all");
+    let o = gkit(&d, &["logoff", "-e"]);
+    for tag in ["R1", "R2", "R3", "R4", "R5"] {
+        assert_contains(&o.stdout, tag);
+    }
+    assert_contains(&o.stdout, "correct-branch");
+    assert_eq!(o.code, 0);
+}
+
+#[test]
+fn explain_rule_deep_dive_reads_the_repo() {
+    // `-e 5` on a repo on main with a local unmerged feature: the deep dive shows
+    // the rule, this repo's live state (naming the branch), examples, and the
+    // FAIL verdict — but exits 0 (informational, not the gate).
+    let r = repo_with_remote("explain-deep", "main");
+    git_ok(&r.work, &["checkout", "-b", "feature-y"]);
+    std::fs::write(r.work.join("y.txt"), "x\n").unwrap();
+    git_ok(&r.work, &["add", "."]);
+    git_ok(&r.work, &["commit", "-m", "unmerged"]);
+    git_ok(&r.work, &["push", "-u", "origin", "feature-y"]);
+    git_ok(&r.work, &["checkout", "main"]);
+    let o = gkit(&r.work, &["logoff", "-e", "5", r.work.to_str().unwrap()]);
+    assert_contains(&o.stdout, "R5");
+    assert_contains(&o.stdout, "correct-branch");
+    assert_contains(&o.stdout, "[this repo: FAIL]");
+    assert_contains(&o.stdout, "This repo now");
+    assert_contains(&o.stdout, "feature-y"); // live branch value
+    assert_contains(&o.stdout, "Examples");
+    assert_eq!(
+        o.code,
+        0,
+        "explain is informational, not a gate:\n{}",
+        o.all()
+    );
+}
+
+#[test]
+fn explain_invalid_rule_errors() {
+    let d = temp_dir("explain-bad");
+    let o = gkit(&d, &["logoff", "-e", "9"]);
+    assert_contains(&o.stderr, "no such rule 9");
+    assert_ne!(o.code, 0);
 }
 
 // ---------------------------------------------------------------- submodule recursion

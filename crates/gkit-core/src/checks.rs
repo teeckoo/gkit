@@ -135,16 +135,17 @@ impl BranchRule {
     }
 }
 
-/// TEAM rule helper: is there a **local** non-integration branch with commits not
-/// merged into base? (Can't determine the base ref → not flagged.)
-fn local_unmerged_feature(git: &dyn Git, dir: &Path, base_branch: &str) -> bool {
+/// TEAM rule helper: the first **local** non-integration branch with commits not
+/// merged into base (your unfinished work), or `None`. (Can't determine the base
+/// ref → not flagged.)
+fn local_unmerged_feature(git: &dyn Git, dir: &Path, base_branch: &str) -> Option<String> {
     let base_ref = base_ref_for(git, dir, base_branch);
     let merged = git.run(
         dir,
         &["branch", "--merged", &base_ref, "--format=%(refname:short)"],
     );
     if !merged.success {
-        return false;
+        return None;
     }
     let merged: HashSet<&str> = merged
         .stdout
@@ -160,11 +161,13 @@ fn local_unmerged_feature(git: &dyn Git, dir: &Path, base_branch: &str) -> bool 
     .lines()
     .map(str::trim)
     .filter(|l| !l.is_empty())
-    .any(|b| !is_integration(b, base_branch) && !merged.contains(b))
+    .find(|b| !is_integration(b, base_branch) && !merged.contains(*b))
+    .map(str::to_string)
 }
 
-/// SOLO rule helper: does the **remote** have any non-integration (feature) branch?
-fn remote_has_feature(git: &dyn Git, dir: &Path, base_branch: &str) -> bool {
+/// SOLO rule helper: the first non-integration (feature) branch on the **remote**,
+/// or `None`.
+fn remote_feature(git: &dyn Git, dir: &Path, base_branch: &str) -> Option<String> {
     git.run(dir, &["ls-remote", "--heads", "origin"])
         .stdout
         .lines()
@@ -172,29 +175,219 @@ fn remote_has_feature(git: &dyn Git, dir: &Path, base_branch: &str) -> bool {
             l.split_once("refs/heads/")
                 .map(|(_, b)| b.trim().to_string())
         })
-        .any(|b| !is_integration(&b, base_branch))
+        .find(|b| !is_integration(b, base_branch))
+}
+
+/// The outcome of the correct-branch check, rich enough to explain *why* it
+/// failed (surfaced by `logoff -vv`'s `R5 reason` line). Only the two passing
+/// variants make [`BranchVerdict::passed`] true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchVerdict {
+    /// On a feature branch — actively on your work (passes).
+    OnFeature,
+    /// On an integration branch with nothing pending under the active rule (passes).
+    IntegrationClean,
+    /// Detached HEAD — not on any branch (a risky resting state).
+    DetachedHead,
+    /// Base branch couldn't be resolved, so the check can't certify anything.
+    BaseUnresolved,
+    /// TEAM rule: this local branch isn't merged into base (your unfinished work).
+    LocalUnmerged(String),
+    /// SOLO rule: the remote has this feature branch.
+    RemoteFeature(String),
+}
+
+impl BranchVerdict {
+    /// Did the correct-branch check pass?
+    pub fn passed(&self) -> bool {
+        matches!(
+            self,
+            BranchVerdict::OnFeature | BranchVerdict::IntegrationClean
+        )
+    }
+
+    /// One-line reason for a **failing** verdict (empty string for the passing
+    /// ones) — the text shown after `R5 reason` at `logoff -vv`.
+    pub fn reason(&self) -> String {
+        match self {
+            BranchVerdict::OnFeature | BranchVerdict::IntegrationClean => String::new(),
+            BranchVerdict::DetachedHead => {
+                "detached HEAD — not on any branch (commits are easily lost here)".to_string()
+            }
+            BranchVerdict::BaseUnresolved => {
+                "base branch unresolved — set gkit.baseBranch or fetch origin/main|master"
+                    .to_string()
+            }
+            BranchVerdict::LocalUnmerged(b) => {
+                format!(
+                    "local branch '{b}' is not merged into base (team rule: your unfinished work)"
+                )
+            }
+            BranchVerdict::RemoteFeature(b) => {
+                format!("remote has feature branch '{b}' (solo rule: every remote branch is yours)")
+            }
+        }
+    }
 }
 
 /// 5. Correct branch — a real-life "are you parked safely?" check (see
-///    `docs/commands/logoff.md`). Shared preamble for both rules:
-///    - **detached HEAD** → false (risky resting state; commits easily lost).
-///    - on a **feature** branch (not base/main/master) → true (actively on work).
+///    `docs/commands/logoff.md`), returning a [`BranchVerdict`] that also explains
+///    a failure. Shared preamble for both rules:
+///    - **detached HEAD** → fails (risky resting state; commits easily lost).
+///    - on a **feature** branch (not base/main/master) → passes (actively on work).
 ///
 ///    On an **integration** branch, exactly one rule runs (see [`BranchRule`]):
 ///    `Team` flags a local unmerged feature branch; `Solo` flags any remote
 ///    feature branch.
-pub fn correct_branch(git: &dyn Git, dir: &Path, base_branch: &str, rule: BranchRule) -> bool {
+pub fn branch_verdict(
+    git: &dyn Git,
+    dir: &Path,
+    base_branch: &str,
+    rule: BranchRule,
+) -> BranchVerdict {
     // Detached HEAD: `symbolic-ref --short HEAD` fails when not on a branch.
     if !git.run(dir, &["symbolic-ref", "--short", "HEAD"]).success {
-        return false;
+        return BranchVerdict::DetachedHead;
     }
     let cur = current_branch(git, dir);
     if !is_integration(&cur, base_branch) {
-        return true; // on a feature branch — fine
+        return BranchVerdict::OnFeature; // on a feature branch — fine
     }
     match rule {
-        BranchRule::Team => !local_unmerged_feature(git, dir, base_branch),
-        BranchRule::Solo => !remote_has_feature(git, dir, base_branch),
+        BranchRule::Team => match local_unmerged_feature(git, dir, base_branch) {
+            Some(b) => BranchVerdict::LocalUnmerged(b),
+            None => BranchVerdict::IntegrationClean,
+        },
+        BranchRule::Solo => match remote_feature(git, dir, base_branch) {
+            Some(b) => BranchVerdict::RemoteFeature(b),
+            None => BranchVerdict::IntegrationClean,
+        },
+    }
+}
+
+/// Boolean form of [`branch_verdict`] — for callers that only need pass/fail.
+pub fn correct_branch(git: &dyn Git, dir: &Path, base_branch: &str, rule: BranchRule) -> bool {
+    branch_verdict(git, dir, base_branch, rule).passed()
+}
+
+/// The five logoff checks, in run order, with stable `R<n>` ids. Single source of
+/// truth for `logoff -vv` line prefixes and the `logoff -e` catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleId {
+    Committed,
+    AllCommitsPushed,
+    BranchesHaveRemote,
+    NotBehindRemote,
+    CorrectBranch,
+}
+
+impl RuleId {
+    /// All five, in the order they run and print.
+    pub const ALL: [RuleId; 5] = [
+        RuleId::Committed,
+        RuleId::AllCommitsPushed,
+        RuleId::BranchesHaveRemote,
+        RuleId::NotBehindRemote,
+        RuleId::CorrectBranch,
+    ];
+
+    /// 1-based rule number (the `<n>` in `R<n>`).
+    pub fn num(self) -> u8 {
+        match self {
+            RuleId::Committed => 1,
+            RuleId::AllCommitsPushed => 2,
+            RuleId::BranchesHaveRemote => 3,
+            RuleId::NotBehindRemote => 4,
+            RuleId::CorrectBranch => 5,
+        }
+    }
+
+    /// The `R<n>` tag shown as a line prefix at `-vv` and in `-e`.
+    pub fn tag(self) -> String {
+        format!("R{}", self.num())
+    }
+
+    /// The stable, greppable check key — identical to the `-v` output keys.
+    pub fn key(self) -> &'static str {
+        match self {
+            RuleId::Committed => "committed",
+            RuleId::AllCommitsPushed => "all-commits-pushed",
+            RuleId::BranchesHaveRemote => "branches-have-remote",
+            RuleId::NotBehindRemote => "not-behind-remote",
+            RuleId::CorrectBranch => "correct-branch",
+        }
+    }
+
+    /// One-line description for `logoff -e`.
+    pub fn description(self) -> &'static str {
+        match self {
+            RuleId::Committed => {
+                "no uncommitted changes in the working tree (git status -s is empty)"
+            }
+            RuleId::AllCommitsPushed => {
+                "every local commit exists on some remote (nothing unpushed)"
+            }
+            RuleId::BranchesHaveRemote => "every local branch has a remote-tracking counterpart",
+            RuleId::NotBehindRemote => {
+                "the current branch is not behind its remote (no pull needed)"
+            }
+            RuleId::CorrectBranch => {
+                "parked on a safe branch: a feature branch always passes; on an integration \
+                 branch the team rule (default) flags a local branch unmerged into base, while \
+                 the solo rule (gkit.solo=true) flags any remote feature branch; detached HEAD \
+                 or an unresolved base always fail"
+            }
+        }
+    }
+
+    /// Static teaching examples — `(scenario, outcome)` pairs shown after the
+    /// live state in the `-e <N>` deep dive. Illustrative, not derived from any repo.
+    pub fn examples(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            RuleId::Committed => &[
+                ("clean working tree", "PASS (nothing to commit)"),
+                ("edited file, not committed", "FAIL (commit or stash it)"),
+                ("staged but uncommitted file", "FAIL (still uncommitted)"),
+            ],
+            RuleId::AllCommitsPushed => &[
+                ("every commit pushed", "PASS"),
+                ("local-only commit on any branch", "FAIL (push it)"),
+                ("amended commit not force-pushed", "FAIL (push the rewrite)"),
+            ],
+            RuleId::BranchesHaveRemote => &[
+                ("every local branch tracks a remote", "PASS"),
+                (
+                    "local 'wip' branch never pushed",
+                    "FAIL (push or delete it)",
+                ),
+            ],
+            RuleId::NotBehindRemote => &[
+                ("up to date with origin", "PASS"),
+                ("no matching remote branch", "PASS (nothing to be behind)"),
+                ("origin has commits you don't", "FAIL (pull --rebase)"),
+            ],
+            RuleId::CorrectBranch => &[
+                ("on a feature branch", "PASS (actively on your work)"),
+                (
+                    "on base/main, all local branches merged",
+                    "PASS (parked clean)",
+                ),
+                (
+                    "on base/main, local 'wip' unmerged",
+                    "FAIL (team: unfinished work)",
+                ),
+                (
+                    "on base/main, remote feature branch exists",
+                    "FAIL (solo only)",
+                ),
+                ("detached HEAD", "FAIL (risky resting state)"),
+            ],
+        }
+    }
+
+    /// Look up a rule by its 1-based number (for `-e <N>`).
+    pub fn from_num(n: u8) -> Option<RuleId> {
+        RuleId::ALL.into_iter().find(|r| r.num() == n)
     }
 }
 
@@ -207,6 +400,9 @@ pub struct RepoStatus {
     pub branches_have_remote: bool,
     pub not_behind_remote: bool,
     pub correct_branch: bool,
+    /// The detailed correct-branch verdict (drives `correct_branch` + the `-vv`
+    /// `R5 reason` line).
+    pub branch_verdict: BranchVerdict,
     /// The base branch used for the correct-branch check + how it was resolved.
     /// When `base.name` is `None` (unresolved), `correct_branch` is forced `false`.
     pub base: ResolvedBase,
@@ -231,6 +427,7 @@ impl RepoStatus {
             branches_have_remote: false,
             not_behind_remote: false,
             correct_branch: false,
+            branch_verdict: BranchVerdict::BaseUnresolved,
             base: ResolvedBase::unresolved(),
             rule: BranchRule::Team,
             problem: Some(reason.into()),
@@ -246,6 +443,34 @@ impl RepoStatus {
             && self.not_behind_remote
             && self.correct_branch
     }
+
+    /// Pass/fail for a single rule (used by the `-vv` per-rule lines).
+    pub fn rule_passed(&self, rule: RuleId) -> bool {
+        match rule {
+            RuleId::Committed => self.committed,
+            RuleId::AllCommitsPushed => self.all_commits_pushed,
+            RuleId::BranchesHaveRemote => self.branches_have_remote,
+            RuleId::NotBehindRemote => self.not_behind_remote,
+            RuleId::CorrectBranch => self.correct_branch,
+        }
+    }
+
+    /// The reason a rule **failed**, or `None` if it passed — the text shown after
+    /// `R<n> reason` at `logoff -vv`.
+    pub fn failure_reason(&self, rule: RuleId) -> Option<String> {
+        if self.rule_passed(rule) {
+            return None;
+        }
+        Some(match rule {
+            RuleId::Committed => "uncommitted changes in the working tree".to_string(),
+            RuleId::AllCommitsPushed => "local commits are not pushed to any remote".to_string(),
+            RuleId::BranchesHaveRemote => {
+                "a local branch has no remote-tracking counterpart".to_string()
+            }
+            RuleId::NotBehindRemote => "the branch is behind its remote (run git pull)".to_string(),
+            RuleId::CorrectBranch => self.branch_verdict.reason(),
+        })
+    }
 }
 
 /// Run all five checks for a single repo at `dir`. An unresolved base
@@ -254,10 +479,11 @@ impl RepoStatus {
 /// `solo` selects the correct-branch rule (`gkit.solo`; see [`BranchRule`]).
 pub fn evaluate(git: &dyn Git, dir: &Path, base: &ResolvedBase, solo: bool) -> RepoStatus {
     let rule = BranchRule::from_solo(solo);
-    let correct_branch = match &base.name {
-        Some(b) => correct_branch(git, dir, b, rule),
-        None => false,
+    let verdict = match &base.name {
+        Some(b) => branch_verdict(git, dir, b, rule),
+        None => BranchVerdict::BaseUnresolved,
     };
+    let correct_branch = verdict.passed();
     RepoStatus {
         branch: current_branch(git, dir),
         committed: committed(git, dir),
@@ -265,9 +491,194 @@ pub fn evaluate(git: &dyn Git, dir: &Path, base: &ResolvedBase, solo: bool) -> R
         branches_have_remote: branches_have_remote(git, dir),
         not_behind_remote: not_behind_remote(git, dir),
         correct_branch,
+        branch_verdict: verdict,
         base: base.clone(),
         rule,
         problem: None,
+    }
+}
+
+/// One rule's deep-dive report for `logoff -e <N>`: the live, per-repo state behind
+/// a single check, ready for [`crate::report::print_rule_detail`] to render.
+#[derive(Debug, Clone)]
+pub struct RuleReport {
+    pub id: RuleId,
+    pub passed: bool,
+    /// "This repo now" label/value lines (rule-specific live state).
+    pub facts: Vec<(String, String)>,
+    /// One-line verdict: the failure reason, or a short "PASS …".
+    pub verdict: String,
+}
+
+/// Gather the live, per-repo state behind one rule for the `-e <N>` deep dive.
+/// Reads git for a **single** repo (no submodule recursion, no fetch) and reuses
+/// the same git commands as the corresponding check, so the two can't drift.
+pub fn rule_report(
+    git: &dyn Git,
+    dir: &Path,
+    base: &ResolvedBase,
+    solo: bool,
+    id: RuleId,
+) -> RuleReport {
+    let lines = |out: crate::git::GitOutput| -> Vec<String> {
+        out.stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let or_none = |v: &[String]| {
+        if v.is_empty() {
+            "(none)".to_string()
+        } else {
+            v.join(", ")
+        }
+    };
+
+    let mut facts: Vec<(String, String)> = Vec::new();
+    let (passed, verdict) = match id {
+        RuleId::Committed => {
+            let dirty = lines(git.run(dir, &["status", "-s"]));
+            for f in &dirty {
+                facts.push(("dirty".to_string(), f.clone()));
+            }
+            if dirty.is_empty() {
+                (true, "PASS — working tree clean".to_string())
+            } else {
+                (
+                    false,
+                    format!("FAIL — {} uncommitted change(s)", dirty.len()),
+                )
+            }
+        }
+        RuleId::AllCommitsPushed => {
+            let unpushed = lines(git.run(
+                dir,
+                &["log", "--oneline", "--branches", "--not", "--remotes"],
+            ));
+            for c in &unpushed {
+                facts.push(("unpushed".to_string(), c.clone()));
+            }
+            if unpushed.is_empty() {
+                (true, "PASS — nothing unpushed".to_string())
+            } else {
+                (
+                    false,
+                    format!("FAIL — {} commit(s) not on any remote", unpushed.len()),
+                )
+            }
+        }
+        RuleId::BranchesHaveRemote => {
+            let remotes: HashSet<String> = git
+                .run(
+                    dir,
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname:short)",
+                        "refs/remotes/origin/*",
+                    ],
+                )
+                .stdout
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("origin/").map(str::to_string))
+                .filter(|b| b != "HEAD")
+                .collect();
+            let locals = lines(git.run(
+                dir,
+                &["for-each-ref", "--format=%(refname:short)", "refs/heads/*"],
+            ));
+            facts.push(("local branches".to_string(), or_none(&locals)));
+            let missing: Vec<String> = locals
+                .iter()
+                .filter(|b| !remotes.contains(*b))
+                .cloned()
+                .collect();
+            if missing.is_empty() {
+                (
+                    true,
+                    "PASS — every local branch tracks a remote".to_string(),
+                )
+            } else {
+                facts.push(("missing remote".to_string(), missing.join(", ")));
+                (
+                    false,
+                    format!("FAIL — no remote for: {}", missing.join(", ")),
+                )
+            }
+        }
+        RuleId::NotBehindRemote => {
+            let cur = current_branch(git, dir);
+            facts.push((
+                "branch".to_string(),
+                if cur.is_empty() {
+                    "(detached)".to_string()
+                } else {
+                    cur.clone()
+                },
+            ));
+            if cur.is_empty() {
+                (true, "PASS — no branch".to_string())
+            } else {
+                let remote_ref = format!("refs/remotes/origin/{cur}");
+                if !git.run(dir, &["show-ref", "--quiet", &remote_ref]).success {
+                    facts.push(("remote branch".to_string(), "none".to_string()));
+                    (true, "PASS — no matching remote branch".to_string())
+                } else {
+                    let range = format!("origin/{cur}...{cur}");
+                    let behind = git
+                        .run(dir, &["rev-list", "--left-right", "--count", &range])
+                        .trimmed()
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    facts.push(("behind by".to_string(), behind.to_string()));
+                    if behind == 0 {
+                        (true, "PASS — up to date with origin".to_string())
+                    } else {
+                        (
+                            false,
+                            format!("FAIL — behind by {behind} commit(s); pull --rebase"),
+                        )
+                    }
+                }
+            }
+        }
+        RuleId::CorrectBranch => {
+            let rule = BranchRule::from_solo(solo);
+            let cur = current_branch(git, dir);
+            let verdict_enum = match &base.name {
+                Some(b) => branch_verdict(git, dir, b, rule),
+                None => BranchVerdict::BaseUnresolved,
+            };
+            let locals = lines(git.run(
+                dir,
+                &["for-each-ref", "--format=%(refname:short)", "refs/heads/*"],
+            ));
+            facts.push((
+                "branch".to_string(),
+                if cur.is_empty() {
+                    "(detached)".to_string()
+                } else {
+                    cur.clone()
+                },
+            ));
+            facts.push(("base".to_string(), base.describe()));
+            facts.push(("rule".to_string(), rule.describe().to_string()));
+            facts.push(("local branches".to_string(), or_none(&locals)));
+            if verdict_enum.passed() {
+                (true, "PASS — parked safely".to_string())
+            } else {
+                (false, format!("FAIL — {}", verdict_enum.reason()))
+            }
+        }
+    };
+    RuleReport {
+        id,
+        passed,
+        facts,
+        verdict,
     }
 }
 
@@ -469,5 +880,214 @@ mod tests {
         let st = evaluate(&g, d(), &ResolvedBase::unresolved(), false);
         assert!(!st.correct_branch);
         assert!(!st.ok());
+    }
+
+    // ---- branch_verdict: the reason behind a correct-branch verdict (for -vv) ----
+
+    #[test]
+    fn verdict_detached_head() {
+        let g = FakeGit::new().fail("symbolic-ref --short HEAD");
+        assert_eq!(
+            branch_verdict(&g, d(), "dev", BranchRule::Team),
+            BranchVerdict::DetachedHead
+        );
+    }
+
+    #[test]
+    fn verdict_on_feature_branch() {
+        let g = FakeGit::new()
+            .ok("symbolic-ref --short HEAD", "feature-x")
+            .ok("rev-parse --abbrev-ref HEAD", "feature-x");
+        assert_eq!(
+            branch_verdict(&g, d(), "dev", BranchRule::Team),
+            BranchVerdict::OnFeature
+        );
+    }
+
+    #[test]
+    fn verdict_team_names_the_unmerged_local_branch() {
+        let g = on_integration("dev", "dev\nfeature-x", "dev");
+        assert_eq!(
+            branch_verdict(&g, d(), "dev", BranchRule::Team),
+            BranchVerdict::LocalUnmerged("feature-x".into())
+        );
+    }
+
+    #[test]
+    fn verdict_team_clean_integration() {
+        let g = on_integration("dev", "dev", "dev");
+        assert_eq!(
+            branch_verdict(&g, d(), "dev", BranchRule::Team),
+            BranchVerdict::IntegrationClean
+        );
+    }
+
+    #[test]
+    fn verdict_solo_names_the_remote_feature_branch() {
+        let g = on_integration("dev", "dev", "dev").ok(
+            "ls-remote --heads origin",
+            "aaa\trefs/heads/dev\nbbb\trefs/heads/alice-x",
+        );
+        assert_eq!(
+            branch_verdict(&g, d(), "dev", BranchRule::Solo),
+            BranchVerdict::RemoteFeature("alice-x".into())
+        );
+    }
+
+    #[test]
+    fn verdict_reason_is_empty_only_when_passing() {
+        assert!(BranchVerdict::OnFeature.reason().is_empty());
+        assert!(BranchVerdict::IntegrationClean.reason().is_empty());
+        assert!(BranchVerdict::DetachedHead
+            .reason()
+            .contains("detached HEAD"));
+        assert!(BranchVerdict::BaseUnresolved
+            .reason()
+            .contains("unresolved"));
+        assert!(BranchVerdict::LocalUnmerged("x".into())
+            .reason()
+            .contains("'x'"));
+        assert!(BranchVerdict::RemoteFeature("x".into())
+            .reason()
+            .contains("'x'"));
+    }
+
+    #[test]
+    fn evaluate_unresolved_sets_base_unresolved_verdict() {
+        // The forced-fail path records *why* (for the -vv reason line), not a bare
+        // false.
+        let g = FakeGit::new()
+            .ok("rev-parse --abbrev-ref HEAD", "feature-x")
+            .ok("status -s", "")
+            .ok("log --oneline --branches --not --remotes", "")
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/remotes/origin/*",
+                "origin/feature-x",
+            )
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/heads/*",
+                "feature-x",
+            )
+            .ok("show-ref --quiet refs/remotes/origin/feature-x", "")
+            .ok(
+                "rev-list --left-right --count origin/feature-x...feature-x",
+                "0\t0",
+            );
+        let st = evaluate(&g, d(), &ResolvedBase::unresolved(), false);
+        assert_eq!(st.branch_verdict, BranchVerdict::BaseUnresolved);
+        assert_eq!(
+            st.failure_reason(RuleId::CorrectBranch),
+            Some(BranchVerdict::BaseUnresolved.reason())
+        );
+    }
+
+    // ---- RuleId catalog + per-rule reasons (for -vv and -e) ----
+
+    #[test]
+    fn rule_ids_are_stable_and_round_trip() {
+        let nums: Vec<u8> = RuleId::ALL.iter().map(|r| r.num()).collect();
+        assert_eq!(nums, vec![1, 2, 3, 4, 5]);
+        for r in RuleId::ALL {
+            assert_eq!(RuleId::from_num(r.num()), Some(r));
+            assert_eq!(r.tag(), format!("R{}", r.num()));
+            assert!(!r.key().is_empty() && !r.description().is_empty());
+        }
+        assert_eq!(RuleId::from_num(0), None);
+        assert_eq!(RuleId::from_num(6), None);
+        assert_eq!(RuleId::CorrectBranch.key(), "correct-branch");
+    }
+
+    #[test]
+    fn failure_reason_is_some_only_for_failing_rules() {
+        // A repo failing only committed: that rule reports a reason, the rest don't.
+        let g = FakeGit::new()
+            .ok("rev-parse --abbrev-ref HEAD", "dev")
+            .ok("status -s", " M file.txt") // dirty -> committed fails
+            .ok("log --oneline --branches --not --remotes", "")
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/remotes/origin/*",
+                "origin/dev",
+            )
+            .ok("for-each-ref --format=%(refname:short) refs/heads/*", "dev")
+            .ok("show-ref --quiet refs/remotes/origin/dev", "")
+            .ok("rev-list --left-right --count origin/dev...dev", "0\t0")
+            .ok("symbolic-ref --short HEAD", "dev")
+            .ok("show-ref --verify --quiet refs/heads/dev", "")
+            .ok("branch --merged dev --format=%(refname:short)", "dev");
+        let base = ResolvedBase {
+            name: Some("dev".into()),
+            source: crate::config::BaseSource::Config,
+        };
+        let st = evaluate(&g, d(), &base, false);
+        assert!(st.failure_reason(RuleId::Committed).is_some());
+        assert!(st.failure_reason(RuleId::AllCommitsPushed).is_none());
+        assert!(st.failure_reason(RuleId::CorrectBranch).is_none());
+    }
+
+    // ---- RuleId::examples + rule_report (the `-e <N>` deep dive) ----
+
+    #[test]
+    fn every_rule_has_examples() {
+        for r in RuleId::ALL {
+            assert!(!r.examples().is_empty(), "{:?} has no examples", r);
+        }
+    }
+
+    fn dev_base() -> ResolvedBase {
+        ResolvedBase {
+            name: Some("dev".into()),
+            source: crate::config::BaseSource::Config,
+        }
+    }
+
+    #[test]
+    fn rule_report_r5_names_unmerged_branch_and_lists_state() {
+        // On dev (integration) with a local unmerged feature -> FAIL, naming it.
+        let g = on_integration("dev", "dev\nfeature-x", "dev");
+        let rep = rule_report(&g, d(), &dev_base(), false, RuleId::CorrectBranch);
+        assert!(!rep.passed);
+        assert!(
+            rep.verdict.contains("feature-x"),
+            "verdict: {}",
+            rep.verdict
+        );
+        // "This repo now" surfaces branch, base, rule, and the local branches.
+        let facts: std::collections::HashMap<_, _> = rep.facts.iter().cloned().collect();
+        assert_eq!(facts.get("branch").map(String::as_str), Some("dev"));
+        assert!(facts.contains_key("base"));
+        assert!(facts.get("local branches").unwrap().contains("feature-x"));
+    }
+
+    #[test]
+    fn rule_report_r1_lists_dirty_files() {
+        let g = FakeGit::new()
+            .ok("rev-parse --abbrev-ref HEAD", "dev")
+            .ok("status -s", " M a.txt\n?? b.txt");
+        let rep = rule_report(&g, d(), &dev_base(), false, RuleId::Committed);
+        assert!(!rep.passed);
+        let dirty: Vec<&str> = rep
+            .facts
+            .iter()
+            .filter(|(l, _)| l == "dirty")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(dirty, vec!["M a.txt", "?? b.txt"]);
+    }
+
+    #[test]
+    fn rule_report_r4_shows_behind_count() {
+        let g = FakeGit::new()
+            .ok("rev-parse --abbrev-ref HEAD", "dev")
+            .ok("show-ref --quiet refs/remotes/origin/dev", "")
+            .ok("rev-list --left-right --count origin/dev...dev", "3\t0");
+        let rep = rule_report(&g, d(), &dev_base(), false, RuleId::NotBehindRemote);
+        assert!(!rep.passed);
+        let facts: std::collections::HashMap<_, _> = rep.facts.iter().cloned().collect();
+        assert_eq!(facts.get("behind by").map(String::as_str), Some("3"));
+        assert!(
+            rep.verdict.contains("behind by 3"),
+            "verdict: {}",
+            rep.verdict
+        );
     }
 }

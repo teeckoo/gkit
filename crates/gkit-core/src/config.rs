@@ -12,7 +12,7 @@ use crate::git::Git;
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Where a resolved base branch came from — surfaced by `logoff --verbose`.
+/// Where a resolved base branch came from — surfaced by `logoff -v`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseSource {
     /// Explicit CLI `--base-branch`.
@@ -60,7 +60,7 @@ impl ResolvedBase {
         }
     }
 
-    /// Human-readable "branch (how it was derived)" for `logoff --verbose`.
+    /// Human-readable "branch (how it was derived)" for `logoff -v`.
     pub fn describe(&self) -> String {
         match (&self.name, self.source) {
             (Some(b), BaseSource::Flag) => format!("{b} (from --base-branch)"),
