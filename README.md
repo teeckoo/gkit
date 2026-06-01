@@ -45,7 +45,7 @@ cargo install --git https://github.com/teeckoo/gkit gkit
 
 | Command | What it does |
 |---|---|
-| `gkit key add\|copy\|list` | Generate `id_<alias>`, manage the gkit-owned `~/.ssh/git_users` (OS-aware), copy a public key, list identities. |
+| `gkit key add\|list` | Generate `id_<alias>` (prompts for any omitted alias/email/provider), manage the gkit-owned `~/.ssh/git_users` (OS-aware), copy the public key to the clipboard, list identities. |
 
 **Repo layer (the everyday loop, once a key is in place):**
 

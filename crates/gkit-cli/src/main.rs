@@ -8,7 +8,7 @@
 use clap::{Args, Parser, Subcommand};
 use gkit_core::git::{Git, SystemGit};
 use gkit_core::{checks, clone, conf, config, key, report, stmb, submodules};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -465,24 +465,23 @@ struct KeyArgs {
 
 #[derive(Subcommand)]
 enum KeyAction {
-    /// Generate id_<alias>, add an ssh Host block to ~/.ssh/git_users, ssh-add it.
+    /// Generate id_<alias>, add an ssh Host block to ~/.ssh/git_users, ssh-add it,
+    /// then copy the public key to the clipboard.
     Add(KeyAddArgs),
-    /// Copy id_<alias>.pub to the clipboard.
-    Copy { alias: String },
     /// List the Host aliases gkit owns in ~/.ssh/git_users.
     List,
 }
 
 #[derive(Args)]
 struct KeyAddArgs {
-    /// Alias = ssh Host = key name (~/.ssh/id_<alias>).
-    alias: String,
-    /// Email comment for the key.
+    /// Alias = ssh Host = key name (~/.ssh/id_<alias>). Prompted if omitted.
+    alias: Option<String>,
+    /// Email comment for the key. Prompted if omitted.
     #[arg(long)]
-    email: String,
-    /// Provider hostname.
-    #[arg(long, default_value = "github.com")]
-    host: String,
+    email: Option<String>,
+    /// Provider hostname. Prompted (with a menu) if omitted; defaults to github.com.
+    #[arg(long)]
+    host: Option<String>,
     /// SSH port (omit for default 22).
     #[arg(long)]
     port: Option<u16>,
@@ -497,7 +496,6 @@ struct KeyAddArgs {
 fn key_cmd(args: KeyArgs) -> ExitCode {
     match args.action {
         KeyAction::Add(a) => key_add(a),
-        KeyAction::Copy { alias } => key_copy(&alias),
         KeyAction::List => key_list(),
     }
 }
@@ -510,24 +508,45 @@ fn ssh_dir() -> PathBuf {
 }
 
 fn key_add(a: KeyAddArgs) -> ExitCode {
+    let interactive = std::io::stdin().is_terminal();
+    // Required inputs: use the flag if given, else prompt (only in a terminal).
+    let alias = match resolve_arg(
+        a.alias,
+        interactive,
+        "alias (ssh Host = key name id_<alias>)",
+    ) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let email = match resolve_arg(a.email, interactive, "email (key comment)") {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    // Provider hostname: explicit --host wins; else a menu in a terminal; else default.
+    let host = match a.host {
+        Some(h) => h,
+        None if interactive => prompt_provider(),
+        None => key::PROVIDERS[0].to_string(),
+    };
+
     let ssh = ssh_dir();
-    let key_path = ssh.join(format!("id_{}", a.alias));
+    let key_path = ssh.join(format!("id_{alias}"));
     let git_users = ssh.join("git_users");
     let ssh_config = ssh.join("config");
     let macos = cfg!(target_os = "macos");
 
-    let block = key::host_block(&a.alias, &a.host, a.port, macos);
+    let block = key::host_block(&alias, &host, a.port, macos);
     let existing_gu = std::fs::read_to_string(&git_users).unwrap_or_default();
-    let new_gu = key::upsert_block(&existing_gu, &a.alias, &block);
+    let new_gu = key::upsert_block(&existing_gu, &alias, &block);
     let existing_cfg = std::fs::read_to_string(&ssh_config).unwrap_or_default();
     let new_cfg = key::ensure_include(&existing_cfg);
     let need_keygen = !key_path.exists();
 
-    println!("gkit key add '{}':", a.alias);
+    println!("gkit key add '{alias}':");
     if need_keygen {
         println!(
             "  ssh-keygen -t ed25519 -C {} -f {}",
-            a.email,
+            email,
             key_path.display()
         );
     } else {
@@ -563,7 +582,7 @@ fn key_add(a: KeyAddArgs) -> ExitCode {
     if need_keygen {
         // interactive (passphrase) -> inherit stdio
         let st = Command::new("ssh-keygen")
-            .args(["-t", "ed25519", "-C", &a.email, "-f"])
+            .args(["-t", "ed25519", "-C", &email, "-f"])
             .arg(&key_path)
             .status();
         if !matches!(st, Ok(s) if s.success()) {
@@ -587,10 +606,10 @@ fn key_add(a: KeyAddArgs) -> ExitCode {
             );
             println!("  block(s) gkit manages in {}.", git_users.display());
             if a.yes
-                || confirm(&format!(
-                    "Add `Include git_users` to {}?",
-                    ssh_config.display()
-                ))
+                || confirm_default(
+                    &format!("Add `Include git_users` to {}?", ssh_config.display()),
+                    true,
+                )
             {
                 if let Err(e) = std::fs::write(&ssh_config, c) {
                     return die(&format!("cannot write {}: {e}", ssh_config.display()));
@@ -617,29 +636,15 @@ fn key_add(a: KeyAddArgs) -> ExitCode {
         Ok(pubkey) => match clipboard_copy(&pubkey) {
             Some(tool) => {
                 println!(
-                    "done. id_{}.pub copied to clipboard ({tool}) — paste it into {}.",
-                    a.alias, a.host
+                    "done. id_{alias}.pub copied to clipboard ({tool}) — paste it into {host}."
                 )
             }
             None => {
-                println!("done. public key (upload to {}):", a.host);
+                println!("done. public key (upload to {host}):");
                 print!("{pubkey}");
             }
         },
         Err(e) => println!("done, but cannot read {}: {e}", pubfile.display()),
-    }
-    ExitCode::SUCCESS
-}
-
-fn key_copy(alias: &str) -> ExitCode {
-    let pubfile = ssh_dir().join(format!("id_{alias}.pub"));
-    let pubkey = match std::fs::read_to_string(&pubfile) {
-        Ok(k) => k,
-        Err(e) => return die(&format!("cannot read {}: {e}", pubfile.display())),
-    };
-    match clipboard_copy(&pubkey) {
-        Some(tool) => println!("copied id_{alias}.pub to clipboard ({tool})"),
-        None => print!("{pubkey}"),
     }
     ExitCode::SUCCESS
 }
@@ -695,11 +700,83 @@ fn short(dir: &Path, root: &Path) -> String {
 }
 
 fn confirm(msg: &str) -> bool {
-    print!("{msg} [y/N]: ");
+    confirm_default(msg, false)
+}
+
+/// Yes/no prompt with an explicit default taken on empty input or EOF (so a bare
+/// Enter, or a non-interactive run, follows `default_yes`).
+fn confirm_default(msg: &str, default_yes: bool) -> bool {
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("{msg} {hint}: ");
     let _ = std::io::stdout().flush();
     let mut s = String::new();
-    let _ = std::io::stdin().read_line(&mut s);
-    matches!(s.trim(), "y" | "Y" | "yes" | "Yes")
+    if std::io::stdin().read_line(&mut s).unwrap_or(0) == 0 {
+        return default_yes; // EOF — take the default
+    }
+    match s.trim() {
+        "" => default_yes,
+        t => matches!(t, "y" | "Y" | "yes" | "Yes"),
+    }
+}
+
+/// Resolve a value that may have been passed as a flag: return it if present,
+/// else prompt for it (only when interactive). A missing value with no terminal
+/// to read from is a hard error rather than a hang.
+fn resolve_arg(val: Option<String>, interactive: bool, label: &str) -> Result<String, ExitCode> {
+    if let Some(v) = val {
+        return Ok(v);
+    }
+    let what = label.split_whitespace().next().unwrap_or("value");
+    if !interactive {
+        return Err(die(&format!("missing {what} (pass it as an argument)")));
+    }
+    read_line(label).ok_or_else(|| die(&format!("missing {what}")))
+}
+
+/// Read one trimmed, non-empty line. `None` on EOF or empty input.
+fn read_line(label: &str) -> Option<String> {
+    print!("{label}: ");
+    let _ = std::io::stdout().flush();
+    let mut s = String::new();
+    if std::io::stdin().read_line(&mut s).unwrap_or(0) == 0 {
+        return None; // EOF / no terminal
+    }
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+/// Show the provider menu and return the chosen hostname. Standard options are
+/// numbered, with a final "other" entry for a custom/private hostname; a bare
+/// Enter takes the default. Re-asks on an out-of-range number.
+fn prompt_provider() -> String {
+    loop {
+        println!("provider:");
+        for (i, p) in key::PROVIDERS.iter().enumerate() {
+            let tag = if i == 0 { "  (default)" } else { "" };
+            println!("  {}) {p}{tag}", i + 1);
+        }
+        println!("  {}) other (custom hostname)", key::PROVIDERS.len() + 1);
+        let raw =
+            read_line(&format!("choose [1-{}]", key::PROVIDERS.len() + 1)).unwrap_or_default();
+        match key::provider_choice(&raw) {
+            key::ProviderChoice::Host(h) => return h,
+            key::ProviderChoice::Custom => {
+                if let Some(h) = read_line("hostname (e.g. git.mycorp.com)") {
+                    return h;
+                }
+                // empty/EOF on the custom prompt → fall back to the default
+                return key::PROVIDERS[0].to_string();
+            }
+            key::ProviderChoice::Invalid => {
+                println!("  ? not a listed option — try again");
+                continue;
+            }
+        }
+    }
 }
 
 fn die(msg: &str) -> ExitCode {

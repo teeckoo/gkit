@@ -47,6 +47,44 @@ pub fn clipboard_candidates(os: &str) -> Vec<(&'static str, Vec<&'static str>)> 
     }
 }
 
+/// Standard git hosts offered by `key add`'s interactive provider menu, in menu
+/// order. The first is the default; a final "other" entry (index `len + 1` in the
+/// menu) lets the user type a custom/private hostname.
+pub const PROVIDERS: &[&str] = &["github.com", "bitbucket.org", "gitlab.com"];
+
+/// Outcome of a provider-menu selection (the raw line the user typed).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProviderChoice {
+    /// A resolved hostname: empty input → the default, a standard pick, or a
+    /// hostname typed verbatim (so power users can skip the menu).
+    Host(String),
+    /// The "other" entry — the caller should prompt for a custom hostname.
+    Custom,
+    /// A bare number outside the menu range — the caller should re-ask.
+    Invalid,
+}
+
+/// Map a provider-menu line to a [`ProviderChoice`]. Empty → default (first
+/// provider). A bare number selects a menu entry (`len + 1` = "other"); an
+/// out-of-range number is [`ProviderChoice::Invalid`]. Any non-numeric input is
+/// taken as a literal hostname.
+pub fn provider_choice(raw: &str) -> ProviderChoice {
+    let t = raw.trim();
+    if t.is_empty() {
+        return ProviderChoice::Host(PROVIDERS[0].to_string());
+    }
+    if let Ok(n) = t.parse::<usize>() {
+        if (1..=PROVIDERS.len()).contains(&n) {
+            return ProviderChoice::Host(PROVIDERS[n - 1].to_string());
+        }
+        if n == PROVIDERS.len() + 1 {
+            return ProviderChoice::Custom;
+        }
+        return ProviderChoice::Invalid;
+    }
+    ProviderChoice::Host(t.to_string())
+}
+
 /// Render the ssh `Host` block for an alias.
 pub fn host_block(alias: &str, hostname: &str, port: Option<u16>, macos: bool) -> String {
     let mut s = String::new();
@@ -133,6 +171,42 @@ pub fn list_hosts(git_users: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_menu_maps_input() {
+        // Empty → default (first provider).
+        assert_eq!(
+            provider_choice(""),
+            ProviderChoice::Host("github.com".into())
+        );
+        assert_eq!(
+            provider_choice("  "),
+            ProviderChoice::Host("github.com".into())
+        );
+        // Standard numbered picks.
+        assert_eq!(
+            provider_choice("1"),
+            ProviderChoice::Host("github.com".into())
+        );
+        assert_eq!(
+            provider_choice("2"),
+            ProviderChoice::Host("bitbucket.org".into())
+        );
+        assert_eq!(
+            provider_choice("3"),
+            ProviderChoice::Host("gitlab.com".into())
+        );
+        // The "other" entry (len + 1) → Custom.
+        assert_eq!(provider_choice("4"), ProviderChoice::Custom);
+        // Out-of-range number → Invalid (re-ask).
+        assert_eq!(provider_choice("9"), ProviderChoice::Invalid);
+        assert_eq!(provider_choice("0"), ProviderChoice::Invalid);
+        // Non-numeric → literal hostname (power users skip the menu).
+        assert_eq!(
+            provider_choice("git.mycorp.com"),
+            ProviderChoice::Host("git.mycorp.com".into())
+        );
+    }
 
     #[test]
     fn block_is_os_aware() {
