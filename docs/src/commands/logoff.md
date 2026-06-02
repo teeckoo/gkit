@@ -91,6 +91,38 @@ shown as a line prefix at `-vv` and looked up with [`-e`](#explaining-the-rules)
    fail-closed cases (unresolved/absent base, detached) — those are config errors to
    fix, not divergence to tolerate.
 
+## Rule philosophy
+
+The checks follow a few deliberate principles — worth knowing, because they explain
+"why did *that* fail?":
+
+- **Rules are independent.** Each rule asks for exactly the inputs it needs and
+  renders its own verdict; none defers to another. So an unresolved base makes **both**
+  R5 (correct-branch) and R6 (not-behind-base) fail — each with its own reason. That's
+  by design, not a double-report bug: every rule reports honestly on its own terms.
+- **Fail-closed — never pass vacuously.** If a rule can't determine its answer (no
+  base resolved, a base ref that can't be located, a detached HEAD, a missing upstream),
+  it **fails** with an actionable reason rather than passing silently. A green check
+  means "verified safe," never "couldn't tell." This is why R4 was tightened: a branch
+  with no remote-tracking ref now fails R4 instead of vacuously passing.
+- **Durability vs. integration are different questions.** R2 (all-commits-pushed)
+  answers *"is my work safe?"* — once everything is on a remote, nothing is lost. R6
+  answers a separate question, *"is my feature branch current with base?"* A branch can
+  be perfectly pushed (R2 green) yet badly behind `dev` (R6 red). So **ahead + pushed is
+  fine** (you're on top of base, ready to PR); **behind base is the defect** — whether
+  diverged (rebase) or merged/stale (delete).
+- **R4 and R6 are twins on different refs.** R4 compares HEAD to its **own** upstream
+  (`origin/<branch>` — "did I pull my branch?"); R6 compares HEAD to the **integration
+  base** (`dev`/`main` — "did my branch keep up with the trunk?"). Neither subsumes the
+  other.
+- **`-vv` is the "why did it fail" view.** Per-failure `R<n> reason` lines live only at
+  `-vv`; the bare `-v` scan and the default output stay pure pass/fail. The single
+  exception is the `gkit.allowDiverged` marker, which rides the default line so a repo
+  *tolerating* divergence is still visible to someone who isn't drilling in with `-vv`.
+- **The default line is an API.** It's `path  branch  status [marker]` with fixed
+  field positions, so [fleet greps](#filtering-repos-with-grep) stay stable across
+  releases.
+
 ## Output
 
 Default (one line per repo, post-order: submodules before their parent):
@@ -121,7 +153,27 @@ fixed order. Just the six checks + `RESULT` (no contextual metadata):
 /path/repo	RESULT	dev	false
 ```
 
-Greppable: `gkit logoff -v | grep -w false`, `… | awk -F'\t' '$NF=="false"'`.
+### Filtering repos with grep
+
+The default line is a stable, greppable contract — `path  branch  status [marker]`:
+the **branch name is always field 2**, the **status (`true`/`false`) always field 3**,
+and the only optional addition is the `gkit.allowDiverged` marker, appended as a
+**trailing** field on passing lines (never shifting the first three). No marker
+contains the substrings `true`/`false`, so `grep true`/`grep false` stay clean. That
+makes the everyday fleet slices just work:
+
+```sh
+gkit logoff ~/work/*           | grep false              # repos that need attention
+gkit logoff ~/work/*           | grep true | grep SCB-   # clean feature branches parked but unmerged
+gkit logoff ~/work/*           | grep allowDiverged      # repos tolerating divergence (audit)
+gkit logoff -v ~/work/* | awk -F'\t' '$NF=="false"'      # -v: failing checks, by column
+gkit logoff -vv ~/work/* | grep 'not-behind-base.*false' # -vv: who's behind base
+```
+
+Because R6 flips a stale/diverged feature branch from `true` to `false`, `grep true |
+grep SCB-` now returns only branches that are *also* current with base — the sharper
+answer than before R6 existed (a branch silently rotting behind `dev` no longer hides
+in the `true` set).
 
 `-vv` is `-v` plus **context + why**: each check line gains its `R<n>` rule id; the
 `base-branch` and `branch-rule` metadata lines appear (only here, not at `-v`); and
