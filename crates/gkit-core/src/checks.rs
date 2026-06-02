@@ -1,6 +1,6 @@
-//! The five log-off checks, ported from the zsh `isEverythingCheckedIn`
+//! The six log-off checks, ported from the zsh `isEverythingCheckedIn`
 //! (code-conf `gitCoreLib.sh`). Each is a pure function over a `&dyn Git`, so it
-//! can be unit-tested with `FakeGit`. A repo is "ok" only if all five pass.
+//! can be unit-tested with `FakeGit`. A repo is "ok" only if all six pass.
 
 use crate::config::ResolvedBase;
 use crate::git::Git;
@@ -59,15 +59,18 @@ pub fn branches_have_remote(git: &dyn Git, dir: &Path) -> bool {
 }
 
 /// 4. Current branch is not behind `origin/<branch>` (nothing to pull).
-///    If there's no matching remote branch, there's nothing to be behind → true.
+///    **Fail-closed**: if we can't determine behind-ness — no current branch
+///    (detached / unborn), no matching remote-tracking ref, or an unparseable
+///    `rev-list` — the check **fails** rather than passing vacuously. It only
+///    passes when there's a remote ref and the branch is genuinely not behind it.
 pub fn not_behind_remote(git: &dyn Git, dir: &Path) -> bool {
     let cur = current_branch(git, dir);
     if cur.is_empty() {
-        return true;
+        return false;
     }
     let remote_ref = format!("refs/remotes/origin/{cur}");
     if !git.run(dir, &["show-ref", "--quiet", &remote_ref]).success {
-        return true;
+        return false;
     }
     let range = format!("origin/{cur}...{cur}");
     let out = git.run(dir, &["rev-list", "--left-right", "--count", &range]);
@@ -77,7 +80,7 @@ pub fn not_behind_remote(git: &dyn Git, dir: &Path) -> bool {
         .next()
         .and_then(|s| s.parse::<u64>().ok())
         .map(|behind| behind == 0)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// True for "integration" branches that are not feature work: the configured
@@ -270,6 +273,169 @@ pub fn correct_branch(git: &dyn Git, dir: &Path, base_branch: &str, rule: Branch
     branch_verdict(git, dir, base_branch, rule).passed()
 }
 
+/// Whether a behind-base feature branch also carries unique commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BehindKind {
+    /// Has commits base lacks AND is behind base — history split (rebase onto base).
+    Diverged,
+    /// No unique commits, just behind base — merged/stale (switch to base & delete).
+    Stale,
+}
+
+/// Outcome of R6 (`not-behind-base`): is the current **feature** branch up to date
+/// with base? Fail-closed — anything we can't determine ([`BaseSyncVerdict::Undeterminable`])
+/// fails. `Behind` fails unless `allowed` (`gkit.allowDiverged`), in which case it
+/// passes but is surfaced as a default-level marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseSyncVerdict {
+    /// On an integration branch (base/main/master) — not feature work (passes).
+    NotApplicable,
+    /// Feature branch, not behind base (passes).
+    Current,
+    /// Feature branch behind base. Fails unless `allowed`.
+    Behind {
+        kind: BehindKind,
+        ahead: u64,
+        behind: u64,
+        base: String,
+        allowed: bool,
+    },
+    /// Couldn't determine sync vs base (absent base ref, detached) — fails.
+    Undeterminable { why: String },
+}
+
+impl BaseSyncVerdict {
+    /// Did R6 pass? (`Behind { allowed: true }` passes but is marked.)
+    pub fn passed(&self) -> bool {
+        match self {
+            BaseSyncVerdict::NotApplicable | BaseSyncVerdict::Current => true,
+            BaseSyncVerdict::Behind { allowed, .. } => *allowed,
+            BaseSyncVerdict::Undeterminable { .. } => false,
+        }
+    }
+
+    /// One-line reason for a **failing** verdict (empty for passing ones) — the
+    /// `R6 reason` text at `logoff -vv`.
+    pub fn reason(&self) -> String {
+        match self {
+            BaseSyncVerdict::Behind {
+                kind,
+                ahead,
+                behind,
+                base,
+                allowed: false,
+            } => match kind {
+                BehindKind::Diverged => format!(
+                    "diverged from base '{base}': {ahead} ahead, {behind} behind — rebase onto base"
+                ),
+                BehindKind::Stale => format!(
+                    "behind base '{base}' by {behind} (no unique commits — switch to base & delete)"
+                ),
+            },
+            BaseSyncVerdict::Undeterminable { why } => why.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// The default-level marker for a **tolerated** divergence
+    /// (`Behind { allowed: true }`), else `None`. ASCII, carrying the stable
+    /// `gkit.allowDiverged` token so suppressed repos stay greppable.
+    pub fn marker(&self) -> Option<String> {
+        match self {
+            BaseSyncVerdict::Behind {
+                kind,
+                allowed: true,
+                ..
+            } => Some(match kind {
+                BehindKind::Diverged => "(diverged, allowed by gkit.allowDiverged)".to_string(),
+                BehindKind::Stale => {
+                    "(behind base, merged, allowed by gkit.allowDiverged)".to_string()
+                }
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// 6. Not behind base — the base-side twin of [`not_behind_remote`] (R4). On a
+///    **feature** branch, fails when the branch is **behind** base (either
+///    *diverged* — also ahead — or *merged/stale* — no unique commits). Integration
+///    branches are skipped ([`BaseSyncVerdict::NotApplicable`]). Fail-closed:
+///    detached HEAD or a base whose ref can't be located →
+///    [`BaseSyncVerdict::Undeterminable`]. `allow_diverged` (`gkit.allowDiverged`)
+///    downgrades a `Behind` failure to a marked pass.
+pub fn base_sync_verdict(
+    git: &dyn Git,
+    dir: &Path,
+    base_branch: &str,
+    allow_diverged: bool,
+) -> BaseSyncVerdict {
+    // Detached HEAD: not on a branch → can't certify a feature branch vs base.
+    if !git.run(dir, &["symbolic-ref", "--short", "HEAD"]).success {
+        return BaseSyncVerdict::Undeterminable {
+            why: "detached HEAD — not on a branch (can't compare to base)".to_string(),
+        };
+    }
+    let cur = current_branch(git, dir);
+    if is_integration(&cur, base_branch) {
+        return BaseSyncVerdict::NotApplicable;
+    }
+    // Locate the base ref: prefer local `refs/heads/<base>`, else `origin/<base>`.
+    // Fail-closed if neither exists (e.g. single-branch clone, never fetched).
+    let local = format!("refs/heads/{base_branch}");
+    let base_ref = if git
+        .run(dir, &["show-ref", "--verify", "--quiet", &local])
+        .success
+    {
+        base_branch.to_string()
+    } else {
+        let remote = format!("refs/remotes/origin/{base_branch}");
+        if !git
+            .run(dir, &["show-ref", "--verify", "--quiet", &remote])
+            .success
+        {
+            return BaseSyncVerdict::Undeterminable {
+                why: format!(
+                    "base '{base_branch}' not found locally or on origin — fetch or set gkit.baseBranch"
+                ),
+            };
+        }
+        format!("origin/{base_branch}")
+    };
+    // `<base>...HEAD`: left = behind base, right = ahead of base (same orientation
+    // as R4's `origin/<cur>...<cur>`).
+    let range = format!("{base_ref}...HEAD");
+    let out = git.run(dir, &["rev-list", "--left-right", "--count", &range]);
+    let mut it = out.trimmed().split_whitespace();
+    let counts = (
+        it.next().and_then(|s| s.parse::<u64>().ok()),
+        it.next().and_then(|s| s.parse::<u64>().ok()),
+    );
+    let (behind, ahead) = match counts {
+        (Some(b), Some(a)) => (b, a),
+        _ => {
+            return BaseSyncVerdict::Undeterminable {
+                why: format!("could not compare to base '{base_branch}'"),
+            }
+        }
+    };
+    if behind == 0 {
+        BaseSyncVerdict::Current
+    } else {
+        BaseSyncVerdict::Behind {
+            kind: if ahead > 0 {
+                BehindKind::Diverged
+            } else {
+                BehindKind::Stale
+            },
+            ahead,
+            behind,
+            base: base_branch.to_string(),
+            allowed: allow_diverged,
+        }
+    }
+}
+
 /// The five logoff checks, in run order, with stable `R<n>` ids. Single source of
 /// truth for `logoff -vv` line prefixes and the `logoff -e` catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,16 +445,18 @@ pub enum RuleId {
     BranchesHaveRemote,
     NotBehindRemote,
     CorrectBranch,
+    NotBehindBase,
 }
 
 impl RuleId {
-    /// All five, in the order they run and print.
-    pub const ALL: [RuleId; 5] = [
+    /// All six, in the order they run and print.
+    pub const ALL: [RuleId; 6] = [
         RuleId::Committed,
         RuleId::AllCommitsPushed,
         RuleId::BranchesHaveRemote,
         RuleId::NotBehindRemote,
         RuleId::CorrectBranch,
+        RuleId::NotBehindBase,
     ];
 
     /// 1-based rule number (the `<n>` in `R<n>`).
@@ -299,6 +467,7 @@ impl RuleId {
             RuleId::BranchesHaveRemote => 3,
             RuleId::NotBehindRemote => 4,
             RuleId::CorrectBranch => 5,
+            RuleId::NotBehindBase => 6,
         }
     }
 
@@ -315,6 +484,7 @@ impl RuleId {
             RuleId::BranchesHaveRemote => "branches-have-remote",
             RuleId::NotBehindRemote => "not-behind-remote",
             RuleId::CorrectBranch => "correct-branch",
+            RuleId::NotBehindBase => "not-behind-base",
         }
     }
 
@@ -329,13 +499,22 @@ impl RuleId {
             }
             RuleId::BranchesHaveRemote => "every local branch has a remote-tracking counterpart",
             RuleId::NotBehindRemote => {
-                "the current branch is not behind its remote (no pull needed)"
+                "the current branch tracks a remote and is not behind it (no pull needed); \
+                 fail-closed — a detached/unborn HEAD or a missing remote-tracking branch fails \
+                 rather than passing vacuously"
             }
             RuleId::CorrectBranch => {
                 "parked on a safe branch: a feature branch always passes; on an integration \
                  branch the team rule (default) flags a local branch unmerged into base, while \
                  the solo rule (gkit.solo=true) flags any remote feature branch; detached HEAD \
                  or an unresolved base always fail"
+            }
+            RuleId::NotBehindBase => {
+                "on a feature branch, not behind the integration base (the base-side twin of \
+                 not-behind-remote): fails when the branch is behind base — diverged (also ahead, \
+                 rebase) or merged/stale (no unique commits, switch to base & delete). Integration \
+                 branches are skipped; fail-closed on detached HEAD or a base whose ref can't be \
+                 located. Suppress with git config gkit.allowDiverged true (still shown as a marker)"
             }
         }
     }
@@ -363,7 +542,7 @@ impl RuleId {
             ],
             RuleId::NotBehindRemote => &[
                 ("up to date with origin", "PASS"),
-                ("no matching remote branch", "PASS (nothing to be behind)"),
+                ("no remote-tracking branch", "FAIL (push it / fix tracking)"),
                 ("origin has commits you don't", "FAIL (pull --rebase)"),
             ],
             RuleId::CorrectBranch => &[
@@ -382,6 +561,19 @@ impl RuleId {
                 ),
                 ("detached HEAD", "FAIL (risky resting state)"),
             ],
+            RuleId::NotBehindBase => &[
+                ("feature 2 ahead, 0 behind base", "PASS (on top of base)"),
+                ("feature 1 ahead, 2 behind base", "FAIL (diverged — rebase)"),
+                (
+                    "feature 0 ahead, 3 behind base",
+                    "FAIL (merged/stale — delete)",
+                ),
+                ("on base/main/master", "PASS (integration branch skipped)"),
+                (
+                    "gkit.allowDiverged=true, diverged",
+                    "PASS (tolerated, marked)",
+                ),
+            ],
         }
     }
 
@@ -391,7 +583,7 @@ impl RuleId {
     }
 }
 
-/// Outcome of all five checks for one repo.
+/// Outcome of all six checks for one repo.
 #[derive(Debug, Clone)]
 pub struct RepoStatus {
     pub branch: String,
@@ -406,6 +598,10 @@ pub struct RepoStatus {
     /// The base branch used for the correct-branch check + how it was resolved.
     /// When `base.name` is `None` (unresolved), `correct_branch` is forced `false`.
     pub base: ResolvedBase,
+    /// R6 (`not-behind-base`) verdict: is the current feature branch behind base?
+    /// Drives the `not_behind_base` pass/fail, the `-vv` `R6 reason`, and the
+    /// default-level `gkit.allowDiverged` marker.
+    pub base_sync: BaseSyncVerdict,
     /// Which correct-branch rule applied (`gkit.solo` selects it). Surfaced in
     /// verbose only when [`BranchRule::Solo`] (the non-default rule).
     pub rule: BranchRule,
@@ -429,6 +625,7 @@ impl RepoStatus {
             correct_branch: false,
             branch_verdict: BranchVerdict::BaseUnresolved,
             base: ResolvedBase::unresolved(),
+            base_sync: BaseSyncVerdict::NotApplicable,
             rule: BranchRule::Team,
             problem: Some(reason.into()),
         }
@@ -442,6 +639,7 @@ impl RepoStatus {
             && self.branches_have_remote
             && self.not_behind_remote
             && self.correct_branch
+            && self.base_sync.passed()
     }
 
     /// Pass/fail for a single rule (used by the `-vv` per-rule lines).
@@ -452,6 +650,7 @@ impl RepoStatus {
             RuleId::BranchesHaveRemote => self.branches_have_remote,
             RuleId::NotBehindRemote => self.not_behind_remote,
             RuleId::CorrectBranch => self.correct_branch,
+            RuleId::NotBehindBase => self.base_sync.passed(),
         }
     }
 
@@ -467,21 +666,43 @@ impl RepoStatus {
             RuleId::BranchesHaveRemote => {
                 "a local branch has no remote-tracking counterpart".to_string()
             }
-            RuleId::NotBehindRemote => "the branch is behind its remote (run git pull)".to_string(),
+            RuleId::NotBehindRemote => {
+                "the branch is behind its remote, or has no remote-tracking branch to compare \
+                 (push it / pull --rebase)"
+                    .to_string()
+            }
             RuleId::CorrectBranch => self.branch_verdict.reason(),
+            RuleId::NotBehindBase => self.base_sync.reason(),
         })
     }
 }
 
-/// Run all five checks for a single repo at `dir`. An unresolved base
-/// (`base.name == None`) forces the correct-branch check to fail — the base
-/// couldn't be determined, so we can't certify the right branch is checked out.
-/// `solo` selects the correct-branch rule (`gkit.solo`; see [`BranchRule`]).
-pub fn evaluate(git: &dyn Git, dir: &Path, base: &ResolvedBase, solo: bool) -> RepoStatus {
+/// Run all six checks for a single repo at `dir`. An unresolved base
+/// (`base.name == None`) forces both base-dependent checks to fail — the base
+/// couldn't be determined, so we can't certify the right branch is checked out
+/// (R5) nor that it's current with base (R6). The two are **independent**: each
+/// reports its own verdict. `solo` selects the correct-branch rule (`gkit.solo`;
+/// see [`BranchRule`]); `allow_diverged` (`gkit.allowDiverged`) downgrades an R6
+/// behind-base failure to a marked pass.
+pub fn evaluate(
+    git: &dyn Git,
+    dir: &Path,
+    base: &ResolvedBase,
+    solo: bool,
+    allow_diverged: bool,
+) -> RepoStatus {
     let rule = BranchRule::from_solo(solo);
     let verdict = match &base.name {
         Some(b) => branch_verdict(git, dir, b, rule),
         None => BranchVerdict::BaseUnresolved,
+    };
+    // R6 is independent and fail-closed: an unresolved base fails it too (not a
+    // vacuous pass), with its own reason — it does not defer to R5.
+    let base_sync = match &base.name {
+        Some(b) => base_sync_verdict(git, dir, b, allow_diverged),
+        None => BaseSyncVerdict::Undeterminable {
+            why: "base unresolved — set gkit.baseBranch or fetch origin/main|master".to_string(),
+        },
     };
     let correct_branch = verdict.passed();
     RepoStatus {
@@ -493,6 +714,7 @@ pub fn evaluate(git: &dyn Git, dir: &Path, base: &ResolvedBase, solo: bool) -> R
         correct_branch,
         branch_verdict: verdict,
         base: base.clone(),
+        base_sync,
         rule,
         problem: None,
     }
@@ -518,6 +740,7 @@ pub fn rule_report(
     dir: &Path,
     base: &ResolvedBase,
     solo: bool,
+    allow_diverged: bool,
     id: RuleId,
 ) -> RuleReport {
     let lines = |out: crate::git::GitOutput| -> Vec<String> {
@@ -618,12 +841,19 @@ pub fn rule_report(
                 },
             ));
             if cur.is_empty() {
-                (true, "PASS — no branch".to_string())
+                (
+                    false,
+                    "FAIL — no current branch (detached/unborn); can't compare to a remote"
+                        .to_string(),
+                )
             } else {
                 let remote_ref = format!("refs/remotes/origin/{cur}");
                 if !git.run(dir, &["show-ref", "--quiet", &remote_ref]).success {
                     facts.push(("remote branch".to_string(), "none".to_string()));
-                    (true, "PASS — no matching remote branch".to_string())
+                    (
+                        false,
+                        "FAIL — no remote-tracking branch (push it / fix tracking)".to_string(),
+                    )
                 } else {
                     let range = format!("origin/{cur}...{cur}");
                     let behind = git
@@ -671,6 +901,61 @@ pub fn rule_report(
                 (true, "PASS — parked safely".to_string())
             } else {
                 (false, format!("FAIL — {}", verdict_enum.reason()))
+            }
+        }
+        RuleId::NotBehindBase => {
+            let cur = current_branch(git, dir);
+            facts.push((
+                "branch".to_string(),
+                if cur.is_empty() {
+                    "(detached)".to_string()
+                } else {
+                    cur.clone()
+                },
+            ));
+            facts.push(("base".to_string(), base.describe()));
+            let verdict = match &base.name {
+                Some(b) => base_sync_verdict(git, dir, b, allow_diverged),
+                None => BaseSyncVerdict::Undeterminable {
+                    why: "base unresolved — set gkit.baseBranch or fetch origin/main|master"
+                        .to_string(),
+                },
+            };
+            if let BaseSyncVerdict::Behind { ahead, behind, .. } = &verdict {
+                facts.push(("ahead of base".to_string(), ahead.to_string()));
+                facts.push(("behind base".to_string(), behind.to_string()));
+            }
+            match &verdict {
+                BaseSyncVerdict::NotApplicable => (
+                    true,
+                    "PASS — on an integration branch (not feature work)".to_string(),
+                ),
+                BaseSyncVerdict::Current => (
+                    true,
+                    "PASS — feature branch is current with base".to_string(),
+                ),
+                BaseSyncVerdict::Behind {
+                    kind,
+                    ahead,
+                    behind,
+                    base: b,
+                    allowed: true,
+                } => {
+                    let what = match kind {
+                        BehindKind::Diverged => {
+                            format!("diverged from '{b}' ({ahead} ahead, {behind} behind)")
+                        }
+                        BehindKind::Stale => format!("behind '{b}' by {behind} (merged/stale)"),
+                    };
+                    (
+                        true,
+                        format!("PASS — {what} but allowed by gkit.allowDiverged"),
+                    )
+                }
+                BaseSyncVerdict::Behind { allowed: false, .. }
+                | BaseSyncVerdict::Undeterminable { .. } => {
+                    (false, format!("FAIL — {}", verdict.reason()))
+                }
             }
         }
     };
@@ -732,11 +1017,20 @@ mod tests {
     }
 
     #[test]
-    fn not_behind_true_when_no_remote_branch() {
+    fn not_behind_false_when_no_remote_branch() {
+        // Fail-closed: no remote-tracking ref to compare against -> fail, not a
+        // vacuous pass (R3 owns "branch has no remote"; R4 stays independent).
         let g = FakeGit::new()
             .ok("rev-parse --abbrev-ref HEAD", "dev")
             .fail("show-ref --quiet refs/remotes/origin/dev");
-        assert!(not_behind_remote(&g, d()));
+        assert!(!not_behind_remote(&g, d()));
+    }
+
+    #[test]
+    fn not_behind_false_when_detached_or_unborn() {
+        // No current branch name -> can't determine behind-ness -> fail-closed.
+        let g = FakeGit::new().ok("rev-parse --abbrev-ref HEAD", "");
+        assert!(!not_behind_remote(&g, d()));
     }
 
     #[test]
@@ -851,7 +1145,7 @@ mod tests {
             name: Some("dev".into()),
             source: crate::config::BaseSource::Config,
         };
-        let st = evaluate(&g, d(), &base, false);
+        let st = evaluate(&g, d(), &base, false, false);
         assert!(st.ok(), "expected all-clear, got {st:?}");
         assert_eq!(st.branch, "dev");
     }
@@ -877,7 +1171,7 @@ mod tests {
                 "rev-list --left-right --count origin/feature-x...feature-x",
                 "0\t0",
             );
-        let st = evaluate(&g, d(), &ResolvedBase::unresolved(), false);
+        let st = evaluate(&g, d(), &ResolvedBase::unresolved(), false, false);
         assert!(!st.correct_branch);
         assert!(!st.ok());
     }
@@ -973,7 +1267,7 @@ mod tests {
                 "rev-list --left-right --count origin/feature-x...feature-x",
                 "0\t0",
             );
-        let st = evaluate(&g, d(), &ResolvedBase::unresolved(), false);
+        let st = evaluate(&g, d(), &ResolvedBase::unresolved(), false, false);
         assert_eq!(st.branch_verdict, BranchVerdict::BaseUnresolved);
         assert_eq!(
             st.failure_reason(RuleId::CorrectBranch),
@@ -986,15 +1280,17 @@ mod tests {
     #[test]
     fn rule_ids_are_stable_and_round_trip() {
         let nums: Vec<u8> = RuleId::ALL.iter().map(|r| r.num()).collect();
-        assert_eq!(nums, vec![1, 2, 3, 4, 5]);
+        assert_eq!(nums, vec![1, 2, 3, 4, 5, 6]);
         for r in RuleId::ALL {
             assert_eq!(RuleId::from_num(r.num()), Some(r));
             assert_eq!(r.tag(), format!("R{}", r.num()));
             assert!(!r.key().is_empty() && !r.description().is_empty());
         }
         assert_eq!(RuleId::from_num(0), None);
-        assert_eq!(RuleId::from_num(6), None);
+        assert_eq!(RuleId::from_num(7), None);
         assert_eq!(RuleId::CorrectBranch.key(), "correct-branch");
+        assert_eq!(RuleId::NotBehindBase.key(), "not-behind-base");
+        assert_eq!(RuleId::from_num(6), Some(RuleId::NotBehindBase));
     }
 
     #[test]
@@ -1018,7 +1314,7 @@ mod tests {
             name: Some("dev".into()),
             source: crate::config::BaseSource::Config,
         };
-        let st = evaluate(&g, d(), &base, false);
+        let st = evaluate(&g, d(), &base, false, false);
         assert!(st.failure_reason(RuleId::Committed).is_some());
         assert!(st.failure_reason(RuleId::AllCommitsPushed).is_none());
         assert!(st.failure_reason(RuleId::CorrectBranch).is_none());
@@ -1044,7 +1340,7 @@ mod tests {
     fn rule_report_r5_names_unmerged_branch_and_lists_state() {
         // On dev (integration) with a local unmerged feature -> FAIL, naming it.
         let g = on_integration("dev", "dev\nfeature-x", "dev");
-        let rep = rule_report(&g, d(), &dev_base(), false, RuleId::CorrectBranch);
+        let rep = rule_report(&g, d(), &dev_base(), false, false, RuleId::CorrectBranch);
         assert!(!rep.passed);
         assert!(
             rep.verdict.contains("feature-x"),
@@ -1063,7 +1359,7 @@ mod tests {
         let g = FakeGit::new()
             .ok("rev-parse --abbrev-ref HEAD", "dev")
             .ok("status -s", " M a.txt\n?? b.txt");
-        let rep = rule_report(&g, d(), &dev_base(), false, RuleId::Committed);
+        let rep = rule_report(&g, d(), &dev_base(), false, false, RuleId::Committed);
         assert!(!rep.passed);
         let dirty: Vec<&str> = rep
             .facts
@@ -1080,7 +1376,7 @@ mod tests {
             .ok("rev-parse --abbrev-ref HEAD", "dev")
             .ok("show-ref --quiet refs/remotes/origin/dev", "")
             .ok("rev-list --left-right --count origin/dev...dev", "3\t0");
-        let rep = rule_report(&g, d(), &dev_base(), false, RuleId::NotBehindRemote);
+        let rep = rule_report(&g, d(), &dev_base(), false, false, RuleId::NotBehindRemote);
         assert!(!rep.passed);
         let facts: std::collections::HashMap<_, _> = rep.facts.iter().cloned().collect();
         assert_eq!(facts.get("behind by").map(String::as_str), Some("3"));
@@ -1089,5 +1385,135 @@ mod tests {
             "verdict: {}",
             rep.verdict
         );
+    }
+
+    // ---- R6 not-behind-base (base_sync_verdict) ----
+
+    /// On feature branch `cur`, base `dev` resolves to `origin/dev` (no local
+    /// `dev`), with the given `<behind>\t<ahead>` rev-list count vs base.
+    fn on_feature_vs_base(cur: &str, counts: &str) -> FakeGit {
+        FakeGit::new()
+            .ok("symbolic-ref --short HEAD", cur)
+            .ok("rev-parse --abbrev-ref HEAD", cur)
+            .fail("show-ref --verify --quiet refs/heads/dev")
+            .ok("show-ref --verify --quiet refs/remotes/origin/dev", "")
+            .ok("rev-list --left-right --count origin/dev...HEAD", counts)
+    }
+
+    #[test]
+    fn base_sync_diverged_fails() {
+        // behind 2, ahead 1 -> diverged -> fail (allow_diverged off).
+        let v = base_sync_verdict(&on_feature_vs_base("feature-x", "2\t1"), d(), "dev", false);
+        assert!(!v.passed());
+        assert!(matches!(
+            v,
+            BaseSyncVerdict::Behind {
+                kind: BehindKind::Diverged,
+                ahead: 1,
+                behind: 2,
+                allowed: false,
+                ..
+            }
+        ));
+        assert!(v.reason().contains("diverged from base 'dev'"));
+    }
+
+    #[test]
+    fn base_sync_pure_ahead_passes() {
+        // behind 0, ahead 3 -> on top of base -> pass.
+        let v = base_sync_verdict(&on_feature_vs_base("feature-x", "0\t3"), d(), "dev", false);
+        assert!(v.passed());
+        assert_eq!(v, BaseSyncVerdict::Current);
+    }
+
+    #[test]
+    fn base_sync_merged_stale_fails() {
+        // behind 2, ahead 0 -> merged/stale -> fail.
+        let v = base_sync_verdict(&on_feature_vs_base("feature-x", "2\t0"), d(), "dev", false);
+        assert!(!v.passed());
+        assert!(matches!(
+            v,
+            BaseSyncVerdict::Behind {
+                kind: BehindKind::Stale,
+                ..
+            }
+        ));
+        assert!(v.reason().contains("behind base 'dev'"));
+    }
+
+    #[test]
+    fn base_sync_even_passes() {
+        let v = base_sync_verdict(&on_feature_vs_base("feature-x", "0\t0"), d(), "dev", false);
+        assert!(v.passed());
+    }
+
+    #[test]
+    fn base_sync_integration_branch_not_applicable() {
+        // On dev itself -> not feature work -> NotApplicable (passes, no marker).
+        let g = FakeGit::new()
+            .ok("symbolic-ref --short HEAD", "dev")
+            .ok("rev-parse --abbrev-ref HEAD", "dev");
+        let v = base_sync_verdict(&g, d(), "dev", false);
+        assert_eq!(v, BaseSyncVerdict::NotApplicable);
+        assert!(v.passed());
+        assert!(v.marker().is_none());
+    }
+
+    #[test]
+    fn base_sync_detached_is_undeterminable() {
+        let g = FakeGit::new().fail("symbolic-ref --short HEAD");
+        let v = base_sync_verdict(&g, d(), "dev", false);
+        assert!(!v.passed());
+        assert!(matches!(v, BaseSyncVerdict::Undeterminable { .. }));
+        assert!(v.reason().contains("detached"));
+    }
+
+    #[test]
+    fn base_sync_absent_base_ref_is_undeterminable() {
+        // Base 'dev' present neither locally nor on origin -> fail-closed.
+        let g = FakeGit::new()
+            .ok("symbolic-ref --short HEAD", "feature-x")
+            .ok("rev-parse --abbrev-ref HEAD", "feature-x")
+            .fail("show-ref --verify --quiet refs/heads/dev")
+            .fail("show-ref --verify --quiet refs/remotes/origin/dev");
+        let v = base_sync_verdict(&g, d(), "dev", false);
+        assert!(!v.passed());
+        assert!(v.reason().contains("not found"));
+    }
+
+    #[test]
+    fn base_sync_allow_diverged_suppresses_to_marked_pass() {
+        // Same diverged repo, but allow_diverged -> passes with a marker.
+        let v = base_sync_verdict(&on_feature_vs_base("feature-x", "2\t1"), d(), "dev", true);
+        assert!(v.passed());
+        assert!(matches!(v, BaseSyncVerdict::Behind { allowed: true, .. }));
+        let marker = v.marker().expect("allowed divergence has a marker");
+        assert!(marker.contains("allowed by gkit.allowDiverged"));
+        assert!(marker.contains("diverged"));
+    }
+
+    #[test]
+    fn evaluate_unresolved_base_fails_r6_independently() {
+        // No base -> R6 is Undeterminable (fail-closed), independent of R5.
+        let g = FakeGit::new()
+            .ok("rev-parse --abbrev-ref HEAD", "feature-x")
+            .ok("status -s", "")
+            .ok("log --oneline --branches --not --remotes", "")
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/remotes/origin/*",
+                "origin/feature-x",
+            )
+            .ok(
+                "for-each-ref --format=%(refname:short) refs/heads/*",
+                "feature-x",
+            )
+            .ok("show-ref --quiet refs/remotes/origin/feature-x", "")
+            .ok(
+                "rev-list --left-right --count origin/feature-x...feature-x",
+                "0\t0",
+            );
+        let st = evaluate(&g, d(), &ResolvedBase::unresolved(), false, false);
+        assert!(!st.rule_passed(RuleId::NotBehindBase));
+        assert!(st.failure_reason(RuleId::NotBehindBase).is_some());
     }
 }

@@ -365,10 +365,11 @@ fn v_single_is_a_pure_scan() {
 fn explain_lists_all_rules() {
     let d = temp_dir("explain-all");
     let o = gkit(&d, &["logoff", "-e"]);
-    for tag in ["R1", "R2", "R3", "R4", "R5"] {
+    for tag in ["R1", "R2", "R3", "R4", "R5", "R6"] {
         assert_contains(&o.stdout, tag);
     }
     assert_contains(&o.stdout, "correct-branch");
+    assert_contains(&o.stdout, "not-behind-base");
     assert_eq!(o.code, 0);
 }
 
@@ -405,6 +406,92 @@ fn explain_invalid_rule_errors() {
     let o = gkit(&d, &["logoff", "-e", "9"]);
     assert_contains(&o.stderr, "no such rule 9");
     assert_ne!(o.code, 0);
+}
+
+// ---------------------------------------------------------------- R6 not-behind-base
+
+/// Leave HEAD on feature `branch` with a unique commit (pushed) while LOCAL `main`
+/// has advanced one commit (pushed) — so `branch` is 1 ahead / 1 behind base.
+fn make_diverged(work: &std::path::Path, branch: &str) {
+    git_ok(work, &["checkout", "-b", branch]);
+    std::fs::write(work.join(format!("{branch}.txt")), "x\n").unwrap();
+    git_ok(work, &["add", "."]);
+    git_ok(work, &["commit", "-m", "feature work"]);
+    git_ok(work, &["push", "-u", "origin", branch]);
+    git_ok(work, &["checkout", "main"]);
+    std::fs::write(work.join("main2.txt"), "y\n").unwrap();
+    git_ok(work, &["add", "."]);
+    git_ok(work, &["commit", "-m", "advance main"]);
+    git_ok(work, &["push", "origin", "main"]);
+    git_ok(work, &["checkout", branch]);
+}
+
+#[test]
+fn r6_diverged_feature_fails() {
+    let r = repo_with_remote("r6-diverged", "main");
+    make_diverged(&r.work, "SCB-283");
+    let o = gkit(
+        &r.work,
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
+    );
+    assert_check(&o.stdout, &r.work, "R6 not-behind-base", "false");
+    assert_contains(&o.stdout, "diverged from base 'main'");
+    assert_eq!(
+        o.code,
+        1,
+        "diverged feature branch should fail:\n{}",
+        o.all()
+    );
+}
+
+#[test]
+fn r6_merged_stale_feature_fails() {
+    // Feature branch at the OLD base tip (no unique commits), base advances -> stale.
+    let r = repo_with_remote("r6-stale", "main");
+    git_ok(&r.work, &["checkout", "-b", "feature-z"]); // at main HEAD
+    git_ok(&r.work, &["push", "-u", "origin", "feature-z"]);
+    git_ok(&r.work, &["checkout", "main"]);
+    std::fs::write(r.work.join("main2.txt"), "y\n").unwrap();
+    git_ok(&r.work, &["add", "."]);
+    git_ok(&r.work, &["commit", "-m", "advance main"]);
+    git_ok(&r.work, &["push", "origin", "main"]);
+    git_ok(&r.work, &["checkout", "feature-z"]);
+    let o = gkit(
+        &r.work,
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
+    );
+    assert_check(&o.stdout, &r.work, "R6 not-behind-base", "false");
+    assert_contains(&o.stdout, "behind base 'main'");
+    assert_eq!(o.code, 1);
+}
+
+#[test]
+fn r6_allow_diverged_passes_with_default_marker() {
+    // Same diverged repo + gkit.allowDiverged -> passes, default line is marked.
+    let r = repo_with_remote("r6-allowed", "main");
+    make_diverged(&r.work, "SCB-283");
+    git_ok(&r.work, &["config", "gkit.allowDiverged", "true"]);
+    // Default output (no -v/-vv): the suppression marker rides the default line.
+    let o = gkit(&r.work, &["logoff", "--no-fetch", r.work.to_str().unwrap()]);
+    assert_contains(&o.stdout, "allowed by gkit.allowDiverged");
+    assert_eq!(o.code, 0, "allowDiverged should pass:\n{}", o.all());
+}
+
+#[test]
+fn r6_pure_ahead_feature_passes() {
+    // Ahead of base but NOT behind -> on top of base -> R6 passes.
+    let r = repo_with_remote("r6-ahead", "main");
+    git_ok(&r.work, &["checkout", "-b", "feature-x"]);
+    std::fs::write(r.work.join("f.txt"), "x\n").unwrap();
+    git_ok(&r.work, &["add", "."]);
+    git_ok(&r.work, &["commit", "-m", "feature"]);
+    git_ok(&r.work, &["push", "-u", "origin", "feature-x"]);
+    let o = gkit(
+        &r.work,
+        &["logoff", "-vv", "--no-fetch", r.work.to_str().unwrap()],
+    );
+    assert_check(&o.stdout, &r.work, "R6 not-behind-base", "true");
+    assert_eq!(o.code, 0, "pure-ahead feature should pass:\n{}", o.all());
 }
 
 // ---------------------------------------------------------------- submodule recursion

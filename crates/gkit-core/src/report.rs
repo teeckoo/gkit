@@ -7,11 +7,17 @@ use crate::submodules::Entry;
 
 /// Default: one line per repo — `<abs-path> <branch> true|false` (zsh-compatible).
 /// For an unusable path the reason sits where the branch would be, so the line
-/// still ends in `false` and stays greppable.
+/// still ends in `false` and stays greppable. A repo tolerating divergence
+/// (`gkit.allowDiverged`) passes but carries a **trailing** marker after the
+/// boolean — never before it, so `path/branch/status` field positions are stable.
 pub fn print_default(entries: &[Entry]) {
     for e in entries {
         let middle = e.status.problem.as_deref().unwrap_or(&e.status.branch);
-        println!("{} {} {}", e.path.display(), middle, e.status.ok());
+        let (path, ok) = (e.path.display(), e.status.ok());
+        match e.status.base_sync.marker() {
+            Some(m) => println!("{path} {middle} {ok} {m}"),
+            None => println!("{path} {middle} {ok}"),
+        }
     }
 }
 
@@ -37,7 +43,14 @@ pub fn print_verbose(entries: &[Entry], reasons: bool) {
             println!("{p}\tbranch-rule\t{}", s.rule.describe());
         }
         emit_check(&p, s, RuleId::CorrectBranch, reasons);
-        println!("{p}\tRESULT\t{}\t{}", s.branch, s.ok());
+        emit_check(&p, s, RuleId::NotBehindBase, reasons);
+        // The `gkit.allowDiverged` marker rides the RESULT line at every level (the
+        // one default/`-v` addition); reason lines stay `-vv`-only. Trailing field,
+        // so RESULT's branch/bool columns don't shift.
+        match s.base_sync.marker() {
+            Some(m) => println!("{p}\tRESULT\t{}\t{}\t{m}", s.branch, s.ok()),
+            None => println!("{p}\tRESULT\t{}\t{}", s.branch, s.ok()),
+        }
     }
 }
 

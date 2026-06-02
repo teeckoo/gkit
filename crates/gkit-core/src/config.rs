@@ -120,6 +120,18 @@ pub fn resolve_solo(git: &dyn Git, dir: &Path) -> bool {
     o.success && o.trimmed() == "true"
 }
 
+/// Read `gkit.allowDiverged` (a bool) for a repo. Default `false` when unset or
+/// unparsable. When `true`, the `not-behind-base` check (R6) no longer **fails**
+/// the gate for a feature branch behind base — the divergence is tolerated but
+/// still surfaced as a default-level marker. Like `gkit.solo`, it honors git's
+/// config layering (`--global` for a default, repo config to override) and is set
+/// manually (`gkit clone` does not stamp it). Does **not** suppress R6's
+/// fail-closed cases (unresolved/absent base, detached) — those are config errors.
+pub fn resolve_allow_diverged(git: &dyn Git, dir: &Path) -> bool {
+    let o = git.run(dir, &["config", "--get", "--bool", "gkit.allowDiverged"]);
+    o.success && o.trimmed() == "true"
+}
+
 /// Current branch, or `None` if HEAD is detached (no symbolic ref).
 pub fn current_branch_opt(git: &dyn Git, dir: &Path) -> Option<String> {
     let o = git.run(dir, &["symbolic-ref", "--short", "HEAD"]);
@@ -245,6 +257,22 @@ mod tests {
         ));
         assert!(!resolve_solo(
             &FakeGit::new().ok("config --get --bool gkit.solo", "false"),
+            d()
+        ));
+    }
+
+    #[test]
+    fn resolve_allow_diverged_defaults_false_and_reads_bool() {
+        assert!(!resolve_allow_diverged(
+            &FakeGit::new().fail("config --get --bool gkit.allowDiverged"),
+            d()
+        ));
+        assert!(resolve_allow_diverged(
+            &FakeGit::new().ok("config --get --bool gkit.allowDiverged", "true"),
+            d()
+        ));
+        assert!(!resolve_allow_diverged(
+            &FakeGit::new().ok("config --get --bool gkit.allowDiverged", "false"),
             d()
         ));
     }

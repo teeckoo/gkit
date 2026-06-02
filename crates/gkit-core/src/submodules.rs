@@ -67,8 +67,9 @@ fn collect_repos(git: &dyn Git, root: &Path) -> Vec<PathBuf> {
 ///
 /// `base_override` (the CLI `--base-branch`) applies only to the root; each
 /// submodule resolves its own base (`gkit.baseBranch`, then remote
-/// `origin/main`/`origin/master`). Like the zsh, submodules are fetched before
-/// checking (when `fetch`), the root is not.
+/// `origin/main`/`origin/master`) and its own `gkit.solo` / `gkit.allowDiverged`.
+/// Like the zsh, submodules are fetched before checking (when `fetch`), the root
+/// is not.
 pub fn evaluate_tree<G: Git + Sync>(
     git: &G,
     root: &Path,
@@ -107,7 +108,8 @@ pub fn evaluate_tree<G: Git + Sync>(
                 }
                 let base = crate::config::resolve_base(git, &path, ovr);
                 let solo = crate::config::resolve_solo(git, &path);
-                checks::evaluate(git, &path, &base, solo)
+                let allow_diverged = crate::config::resolve_allow_diverged(git, &path);
+                checks::evaluate(git, &path, &base, solo, allow_diverged)
             });
             handles.push((i, handle));
         }

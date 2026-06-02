@@ -243,13 +243,21 @@ fn logoff_cmd(args: LogoffArgs) -> ExitCode {
             }
             Some(n) => {
                 let Some(rule) = checks::RuleId::from_num(n) else {
-                    return die(&format!("-e: no such rule {n} (valid rules are R1..R5)"));
+                    return die(&format!("-e: no such rule {n} (valid rules are R1..R6)"));
                 };
                 let git = SystemGit;
                 let dir = canonical(args.paths.first().map(String::as_str).unwrap_or("."));
                 let base = config::resolve_base(&git, &dir, args.base_branch.as_deref());
                 let solo = config::resolve_solo(&git, &dir);
-                report::print_rule_detail(&checks::rule_report(&git, &dir, &base, solo, rule));
+                let allow_diverged = config::resolve_allow_diverged(&git, &dir);
+                report::print_rule_detail(&checks::rule_report(
+                    &git,
+                    &dir,
+                    &base,
+                    solo,
+                    allow_diverged,
+                    rule,
+                ));
                 return ExitCode::SUCCESS;
             }
         }

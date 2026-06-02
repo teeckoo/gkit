@@ -29,15 +29,19 @@ In fleet mode each repo resolves its own base branch (`gkit.baseBranch`, then
 remote `origin/main`/`origin/master`). Exit is non-zero if any repo fails a check
 or any conf fails to parse.
 
-## The five checks
+## The six checks
 
-For each repo and submodule, all must pass. Each rule has a stable id (`R1`..`R5`),
+For each repo and submodule, all must pass. Each rule has a stable id (`R1`..`R6`),
 shown as a line prefix at `-vv` and looked up with [`-e`](#explaining-the-rules):
 
 1. **R1 committed** — `git status -s` is empty.
 2. **R2 all-commits-pushed** — no local commit is missing from a remote.
 3. **R3 branches-have-remote** — every local branch has a remote counterpart.
-4. **R4 not-behind-remote** — current branch isn't behind `origin/<branch>`.
+4. **R4 not-behind-remote** — the current branch tracks a remote and isn't behind
+   `origin/<branch>`. **Fail-closed**: if behind-ness can't be determined — a
+   detached/unborn HEAD, or **no remote-tracking branch** to compare against — the
+   check **fails** rather than passing vacuously. (It stays independent of R3: a
+   branch with no upstream fails both.)
 5. **R5 correct-branch** — are you parked on a *safe* branch? Shared preamble for both
    rules: **detached HEAD** → fails (a risky resting state); on a **feature** branch
    → passes (you're actively on your work). On an **integration** branch
@@ -62,6 +66,31 @@ shown as a line prefix at `-vv` and looked up with [`-e`](#explaining-the-rules)
    The active rule is surfaced on a `branch-rule` line at `-vv` (always, team or
    solo); the bare `-v` scan and the default output print nothing about it.
 
+6. **R6 not-behind-base** — the base-side twin of R4: on a **feature** branch, is it
+   **behind base**? Fails when the branch has fallen behind the integration base
+   (`git rev-list --left-right` against `gkit.baseBranch` / `origin/main`/`master`),
+   in either form:
+
+   - **diverged** — also *ahead* of base (you have unique commits): history has split,
+     **rebase onto base**.
+   - **merged / stale** — *not* ahead (no unique commits): the branch is done,
+     **switch to base & delete** (that's [`gkit stmb`](./stmb.md)).
+
+   A feature branch that's ahead of base but **not behind** (on top of base, ready to
+   PR) passes. **Integration branches are skipped** (comparing base to itself is
+   vacuous). **Fail-closed**, and **independent of R5**: a detached HEAD, an
+   unresolved base, or a base whose ref can't be located all **fail** R6 with their
+   own reason (they don't defer to R5). Accuracy depends on a fresh `origin/<base>`:
+   under `--no-fetch` R6 compares against your last-fetched base.
+
+   **Tolerate it with `gkit.allowDiverged`.** `git config gkit.allowDiverged true`
+   (per repo, or `--global`) downgrades an R6 behind-base **failure** to a **pass** —
+   but the default output still carries a marker (e.g. `… true (diverged, allowed by
+   gkit.allowDiverged)`), so it stays visible and greppable (`gkit logoff | grep
+   allowDiverged` audits the tolerated repos). It does **not** suppress R6's
+   fail-closed cases (unresolved/absent base, detached) — those are config errors to
+   fix, not divergence to tolerate.
+
 ## Output
 
 Default (one line per repo, post-order: submodules before their parent):
@@ -71,8 +100,16 @@ Default (one line per repo, post-order: submodules before their parent):
 /path/repo               dev false
 ```
 
+A repo tolerating divergence (`gkit.allowDiverged`) passes but the line carries a
+**trailing** marker after the boolean (never before it, so `path branch status`
+field positions stay stable):
+
+```text
+/path/repo   SCB-283 true (diverged, allowed by gkit.allowDiverged)
+```
+
 `-v` — a pure pass/fail **scan**: one fact per line, path-first, tab-separated,
-fixed order. Just the five checks + `RESULT` (no contextual metadata):
+fixed order. Just the six checks + `RESULT` (no contextual metadata):
 
 ```text
 /path/repo	committed	true
@@ -80,6 +117,7 @@ fixed order. Just the five checks + `RESULT` (no contextual metadata):
 /path/repo	branches-have-remote	true
 /path/repo	not-behind-remote	true
 /path/repo	correct-branch	true
+/path/repo	not-behind-base	true
 /path/repo	RESULT	dev	false
 ```
 
@@ -88,16 +126,22 @@ Greppable: `gkit logoff -v | grep -w false`, `… | awk -F'\t' '$NF=="false"'`.
 `-vv` is `-v` plus **context + why**: each check line gains its `R<n>` rule id; the
 `base-branch` and `branch-rule` metadata lines appear (only here, not at `-v`); and
 every **failing** check is followed by an `R<n> reason` line (R5 names the offending
-branch). Passing checks get no reason line:
+branch, R6 the base + ahead/behind counts). Passing checks get no reason line:
 
 ```text
 /path/repo	R1 committed	true
 /path/repo	R4 not-behind-remote	true
 /path/repo	base-branch	dev (from git config gkit.baseBranch)
 /path/repo	branch-rule	team (gkit.solo off) — flags a local branch unmerged into base
-/path/repo	R5 correct-branch	false
-/path/repo	R5 reason	local branch 'feat-x' is not merged into base (team rule: your unfinished work)
+/path/repo	R5 correct-branch	true
+/path/repo	R6 not-behind-base	false
+/path/repo	R6 reason	diverged from base 'dev': 1 ahead, 2 behind — rebase onto base
+/path/repo	RESULT	SCB-283	false
 ```
+
+The `gkit.allowDiverged` marker is the **one** thing that rides the default/`-v`
+output (on the RESULT line and the default line); the per-failure `R<n> reason`
+lines remain `-vv`-only — `-vv` is the "why did it fail" view.
 
 The `base-branch` line shows the resolved base **and how it was derived** —
 `(from --base-branch)`, `(from git config gkit.baseBranch)`, or
@@ -112,7 +156,7 @@ Two forms, both exit `0` (informational, never the gate):
 Read-only; ignores paths and never touches git:
 
 ```sh
-gkit logoff -e      # R1..R5, one per line
+gkit logoff -e      # R1..R6, one per line
 ```
 
 **`-e <N>`** — a **repo-aware deep dive** on one rule: what it checks, *this repo's*
@@ -145,7 +189,7 @@ R5  correct-branch    [this repo: FAIL]
     detached HEAD                            FAIL (risky resting state)
 ```
 
-An out-of-range rule number (not `1`..`5`) errors with a non-zero exit.
+An out-of-range rule number (not `1`..`6`) errors with a non-zero exit.
 
 A path that **isn't a git repository** (or doesn't exist) **fails the gate** rather
 than passing — the reason is shown where the branch would be, so the line still
