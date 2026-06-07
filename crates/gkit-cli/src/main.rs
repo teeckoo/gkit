@@ -222,7 +222,7 @@ struct LogoffArgs {
     /// repo's live state, and examples (single repo — cwd or the given path).
     #[arg(short = 'e', value_name = "RULE")]
     explain: Option<Option<u8>>,
-    /// Skip fetching submodules before checking (faster / offline).
+    /// Skip fetching (root + submodules) before checking (faster / offline; R4/R6 then use local refs).
     #[arg(long)]
     no_fetch: bool,
     /// Override the base branch (root only). Otherwise: gkit.baseBranch, then

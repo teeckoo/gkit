@@ -41,7 +41,8 @@ shown as a line prefix at `-vv` and looked up with [`-e`](#explaining-the-rules)
    `origin/<branch>`. **Fail-closed**: if behind-ness can't be determined — a
    detached/unborn HEAD, or **no remote-tracking branch** to compare against — the
    check **fails** rather than passing vacuously. (It stays independent of R3: a
-   branch with no upstream fails both.)
+   branch with no upstream fails both.) gkit fetches the repo first (unless
+   `--no-fetch`) so `origin/<branch>` is fresh, not a stale local copy.
 5. **R5 correct-branch** — are you parked on a *safe* branch? Shared preamble for both
    rules: **detached HEAD** → fails (a risky resting state); on a **feature** branch
    → passes (you're actively on your work). On an **integration** branch
@@ -261,7 +262,7 @@ reads as "nothing pending".)
 |---|---|
 | `-v` | Per-check breakdown (greppable). Repeat (`-vv`) to add `R<n>` rule ids and a `reason` line for each failing check. |
 | `-e` | Explain (exits 0). Bare = static rule catalog (no repo). `-e <N>` = repo-aware deep dive on rule R`N`: what it checks + this repo's live state + examples (single repo: cwd or the given path). |
-| `--no-fetch` | Don't fetch submodules first (faster / offline). |
+| `--no-fetch` | Don't fetch first (root **and** submodules; faster / offline). The behind checks (R4, R6) then compare against your last-fetched refs and can pass vacuously on a stale local copy. |
 | `--base-branch <b>` | Override the base branch (root repo only). |
 
 > Parallelized for speed, but results are buffered and emitted in a fixed order, so

@@ -68,8 +68,11 @@ fn collect_repos(git: &dyn Git, root: &Path) -> Vec<PathBuf> {
 /// `base_override` (the CLI `--base-branch`) applies only to the root; each
 /// submodule resolves its own base (`gkit.baseBranch`, then remote
 /// `origin/main`/`origin/master`) and its own `gkit.solo` / `gkit.allowDiverged`.
-/// Like the zsh, submodules are fetched before checking (when `fetch`), the root
-/// is not.
+/// Every repo — root and submodules — is fetched before checking (when `fetch`,
+/// i.e. unless `--no-fetch`), so the behind checks (R4 not-behind-remote, R6
+/// not-behind-base) compare against fresh remote-tracking refs rather than stale
+/// ones. (The zsh fetched only submodules; the root's `origin/<branch>` could go
+/// stale and make R4/R6 a false green — fail-closed requires a fresh fetch.)
 pub fn evaluate_tree<G: Git + Sync>(
     git: &G,
     root: &Path,
@@ -99,7 +102,7 @@ pub fn evaluate_tree<G: Git + Sync>(
         for (i, path) in repos.iter().enumerate() {
             let is_root = i == last;
             let ovr = if is_root { base_override } else { None };
-            let do_fetch = fetch && !is_root; // zsh fetches submodules, not the root
+            let do_fetch = fetch; // fetch every repo (root + submodules) so R4/R6 compare against fresh remote refs
             let path = path.clone();
             let handle = scope.spawn(move || {
                 if do_fetch {

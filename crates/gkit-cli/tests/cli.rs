@@ -494,6 +494,43 @@ fn r6_pure_ahead_feature_passes() {
     assert_eq!(o.code, 0, "pure-ahead feature should pass:\n{}", o.all());
 }
 
+// ---------------------------------------------------------------- root fetch
+
+/// gkit logoff fetches the ROOT repo (not just submodules) before the behind
+/// checks. The remote advances out-of-band while the work clone's `origin/main`
+/// stays stale: with `--no-fetch` R4 passes vacuously against the stale ref;
+/// the default run fetches the root, sees the branch is 1 behind, and R4 fails.
+/// Regression for the root never being fetched (stale-ref false green).
+#[test]
+fn logoff_fetches_root_before_behind_check() {
+    let r = repo_with_remote("rootfetch", "main");
+    // A second clone advances the remote's main by one pushed commit, so the
+    // first work clone's origin/main is now stale (still at the old tip).
+    let other = temp_dir("rootfetch-other");
+    git_ok(&other, &["clone", &file_url(&r.bare), "."]);
+    std::fs::write(other.join("more.txt"), "x\n").unwrap();
+    git_ok(&other, &["add", "."]);
+    git_ok(&other, &["commit", "-m", "advance remote"]);
+    git_ok(&other, &["push", "origin", "main"]);
+
+    // --no-fetch: stale origin/main == HEAD, so R4 passes vacuously.
+    let stale = gkit(
+        &r.work,
+        &["logoff", "-v", "--no-fetch", r.work.to_str().unwrap()],
+    );
+    assert_check(&stale.stdout, &r.work, "not-behind-remote", "true");
+
+    // default (fetch): gkit fetches the root, origin/main advances, R4 fails.
+    let fresh = gkit(&r.work, &["logoff", "-v", r.work.to_str().unwrap()]);
+    assert_check(&fresh.stdout, &r.work, "not-behind-remote", "false");
+    assert_eq!(
+        fresh.code,
+        1,
+        "behind remote after a root fetch should fail:\n{}",
+        fresh.all()
+    );
+}
+
 // ---------------------------------------------------------------- submodule recursion
 
 #[test]
