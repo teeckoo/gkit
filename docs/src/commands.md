@@ -21,6 +21,7 @@ fleet from a conf):
 |---|---|
 | [`init`](./commands/init.md) | Scaffold a starter clone conf in the current directory. |
 | [`clone`](./commands/clone.md) | Clone the repos in a conf file, with hooks and transparent commands. |
+| [`stamp`](./commands/stamp.md) | Re-apply a conf's `post-clone` over existing repos (e.g. stamp config on a late-added submodule). |
 | [`logoff`](./commands/logoff.md) | Gate: is every repo + submodule committed and pushed? |
 | [`stmb`](./commands/stmb.md) | Switch to the base branch and safe-delete a finished feature, recursively. |
 

@@ -77,8 +77,9 @@ fn submodule_identity_cmd(user_name: Option<&str>, user_email: Option<&str>) -> 
 }
 
 /// Run hook commands via `sh -c` in `cwd` with `env` set; output inherited; each
-/// printed `+ <cmd>`. Stops at the first non-zero exit.
-fn run_hooks(cmds: &[String], cwd: &Path, env: &[(&str, &str)]) -> Result<(), String> {
+/// printed `+ <cmd>`. Stops at the first non-zero exit. Shared with `stamp`, which
+/// re-runs a conf's `post-clone` over an existing tree.
+pub(crate) fn run_hooks(cmds: &[String], cwd: &Path, env: &[(&str, &str)]) -> Result<(), String> {
     for cmd in cmds {
         println!("+ {cmd}");
         let mut c = Command::new("sh");

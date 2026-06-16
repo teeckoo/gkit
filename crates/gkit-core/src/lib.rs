@@ -11,5 +11,6 @@ pub mod config;
 pub mod git;
 pub mod key;
 pub mod report;
+pub mod stamp;
 pub mod stmb;
 pub mod submodules;

@@ -93,6 +93,10 @@ Git identity is **not** a conf key (the conf is shared across a team): it comes
 from the `clone` `--user-name`/`--user-email` flags, or an interactive prompt when
 omitted — see [`gkit clone`](./commands/clone.md).
 
+The `post-clone` hooks run only at clone time. To **re-apply** them over repos that
+already exist (e.g. to stamp `gkit.baseBranch`/`gkit.solo` on a submodule added
+after the initial clone), run [`gkit stamp <conf>`](./commands/stamp.md).
+
 ## Built-in, stateless post-clone
 
 Derived from each repo's own on-disk metadata — no config needed:

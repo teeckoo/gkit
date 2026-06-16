@@ -1,13 +1,14 @@
 //! gkit — a transparent git/ssh toolkit.
 //!
 //! Noun-style subcommands over `gkit-core`: `clone` (config-driven, hooked),
-//! `logoff` (the log-off gate), `stmb` (switch-to-main-branch,
-//! recursive + safe), `key` (ssh keys). Mutating actions support `--dry-run` and
-//! confirm before acting (skip with `--yes`).
+//! `stamp` (re-apply a conf's post-clone over existing repos), `logoff` (the
+//! log-off gate), `stmb` (switch-to-main-branch, recursive + safe), `key` (ssh
+//! keys). Mutating actions support `--dry-run` and confirm before acting (skip with
+//! `--yes`).
 
 use clap::{Args, Parser, Subcommand};
 use gkit_core::git::{Git, SystemGit};
-use gkit_core::{checks, clone, conf, config, key, report, stmb, submodules};
+use gkit_core::{checks, clone, conf, config, key, report, stamp, stmb, submodules};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -26,6 +27,9 @@ enum Cmd {
     Init(InitArgs),
     /// Clone repos from a conf file (built-in submodule branch-switch + direnv trust).
     Clone(CloneArgs),
+    /// Re-apply a conf's post-clone hooks over existing repos (no cloning) — e.g. to
+    /// stamp gkit config on submodules added after the initial clone.
+    Stamp(StampArgs),
     /// Log-off check: is every repo + submodule committed and pushed? (exit 0 = clear)
     Logoff(LogoffArgs),
     /// Switch to the base branch, update it, and delete the finished feature branch
@@ -39,6 +43,7 @@ fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Init(a) => init_cmd(a),
         Cmd::Clone(a) => clone_cmd(a),
+        Cmd::Stamp(a) => stamp_cmd(a),
         Cmd::Logoff(a) => logoff_cmd(a),
         Cmd::Stmb(a) => stmb_cmd(a),
         Cmd::Key(a) => key_cmd(a),
@@ -188,6 +193,98 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
         if reports
             .iter()
             .any(|r| matches!(r.outcome, clone::Outcome::Failed(_)))
+        {
+            failed = true;
+        }
+    }
+
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+// ---------------------------------------------------------------- stamp
+
+#[derive(Args)]
+struct StampArgs {
+    /// Conf file(s) whose `post-clone` hooks to re-apply to the existing repos
+    /// (e.g. `repos.toml` or `*.toml`). Same explicit-file rule as `clone`.
+    paths: Vec<String>,
+    /// Print the plan (repos + the hooks that would run) without changing anything.
+    #[arg(long)]
+    dry_run: bool,
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    yes: bool,
+}
+
+fn stamp_cmd(args: StampArgs) -> ExitCode {
+    let confs = match resolve_confs(&args.paths) {
+        Ok(c) => c,
+        Err(e) => return die(&e),
+    };
+
+    // Load + validate every conf up front so the plan (and the single confirm)
+    // covers all of them. A conf that fails to read/parse/validate is reported and
+    // dropped; the rest still run (exit code reflects the failure).
+    let mut failed = false;
+    let mut loaded: Vec<(PathBuf, conf::CloneConf)> = Vec::new();
+    for conf_path in &confs {
+        match std::fs::read_to_string(conf_path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| conf::parse(&t))
+            .and_then(|c| c.validate().map(|_| c))
+        {
+            Ok(c) => loaded.push((conf_path.clone(), c)),
+            Err(e) => {
+                eprintln!("gkit: {}: {e}", conf_path.display());
+                failed = true;
+            }
+        }
+    }
+
+    // Plan: list each repo and the hooks stamp would run (cwd = the repo dir).
+    println!("stamp plan:");
+    for (path, cfg) in &loaded {
+        if loaded.len() > 1 {
+            println!("== {} ==", path.display());
+        }
+        for r in &cfg.repo {
+            let dir = conf::expand_path(&r.dir, |k| std::env::var(k).ok());
+            let hooks = stamp::effective_post_clone(cfg, r);
+            if hooks.is_empty() {
+                println!("  {}  ({dir}) -- no post-clone hooks", r.name());
+            } else {
+                println!("  {}  ({dir}):", r.name());
+                for h in &hooks {
+                    println!("    + {h}");
+                }
+            }
+        }
+    }
+
+    if args.dry_run {
+        return if failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
+    if !args.yes && !confirm("Proceed?") {
+        println!("aborted.");
+        return ExitCode::SUCCESS;
+    }
+
+    for (path, cfg) in &loaded {
+        if loaded.len() > 1 {
+            println!("== {} ==", path.display());
+        }
+        let reports = stamp::stamp_all(&SystemGit, cfg);
+        if reports
+            .iter()
+            .any(|r| matches!(r.outcome, stamp::Outcome::Failed(_)))
         {
             failed = true;
         }

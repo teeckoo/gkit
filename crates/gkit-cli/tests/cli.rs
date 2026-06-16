@@ -840,3 +840,141 @@ fn init_refuses_existing_without_force() {
     assert_eq!(again.code, 2);
     assert_eq!(gkit(&d, &["init", "--force", "repos.toml"]).code, 0);
 }
+
+// ---------------------------------------------------------------- stamp
+
+/// Write a conf file under `dir` and return its path (as a CLI arg string). Dirs
+/// are embedded as TOML **literal strings** (single-quoted) so a Windows path's
+/// backslashes aren't treated as escapes.
+fn write_conf(dir: &std::path::Path, name: &str, text: &str) -> String {
+    let p = dir.join(name);
+    std::fs::write(&p, text).unwrap();
+    p.to_str().unwrap().to_string()
+}
+
+#[test]
+fn stamp_runs_post_clone_config() {
+    let r = repo_with_remote("stamp-basic", "main");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git config gkit.baseBranch dev\", \"git config gkit.solo true\"]\n\
+         [[repo]]\ndir = '{}'\n",
+        r.work.display()
+    );
+    let cf = write_conf(&r.work, "stamp.toml", &conf);
+    let o = gkit(&r.work, &["stamp", &cf, "-y"]);
+    assert_eq!(o.code, 0, "stamp should succeed:\n{}", o.all());
+    assert_contains(&o.stdout, "stamped");
+    // The repo now carries the stamped git config the gate reads.
+    assert_eq!(
+        git(&r.work, &["config", "--local", "gkit.baseBranch"])
+            .stdout
+            .trim(),
+        "dev"
+    );
+    assert_eq!(
+        git(&r.work, &["config", "--local", "gkit.solo"])
+            .stdout
+            .trim(),
+        "true"
+    );
+}
+
+#[test]
+fn stamp_recurses_into_submodules() {
+    // The motivating case: a submodule that lacks gkit config (like a chapter added
+    // on a feature branch after the initial clone) gets stamped via the conf's
+    // `git submodule foreach --recursive` post-clone hook.
+    let sup = repo_with_remote("stamp-sup", "main");
+    add_submodule(&sup.work, "stamp-sub", "child");
+    let child = sup.work.join("child");
+    assert!(
+        !git(&child, &["config", "--local", "gkit.baseBranch"]).ok,
+        "submodule should start with no gkit.baseBranch"
+    );
+
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git config gkit.baseBranch dev\", \
+         \"git submodule foreach --recursive 'git config gkit.baseBranch dev'\"]\n\
+         [[repo]]\ndir = '{}'\n",
+        sup.work.display()
+    );
+    let cf = write_conf(&sup.work, "stamp.toml", &conf);
+    let o = gkit(&sup.work, &["stamp", &cf, "-y"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_eq!(
+        git(&sup.work, &["config", "--local", "gkit.baseBranch"])
+            .stdout
+            .trim(),
+        "dev"
+    );
+    assert_eq!(
+        git(&child, &["config", "--local", "gkit.baseBranch"])
+            .stdout
+            .trim(),
+        "dev",
+        "the late-added submodule must be stamped too"
+    );
+}
+
+#[test]
+fn stamp_dry_run_changes_nothing() {
+    let r = repo_with_remote("stamp-dry", "main");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git config gkit.baseBranch dev\"]\n[[repo]]\ndir = '{}'\n",
+        r.work.display()
+    );
+    let cf = write_conf(&r.work, "stamp.toml", &conf);
+    let o = gkit(&r.work, &["stamp", &cf, "--dry-run"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_contains(&o.stdout, "stamp plan:");
+    assert_contains(&o.stdout, "git config gkit.baseBranch dev");
+    assert!(
+        !git(&r.work, &["config", "--local", "gkit.baseBranch"]).ok,
+        "dry-run must not write any config"
+    );
+}
+
+#[test]
+fn stamp_missing_dir_fails() {
+    let d = temp_dir("stamp-missing");
+    let missing = d.join("nope");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git config gkit.baseBranch dev\"]\n[[repo]]\ndir = '{}'\n",
+        missing.display()
+    );
+    let cf = write_conf(&d, "stamp.toml", &conf);
+    let o = gkit(&d, &["stamp", &cf, "-y"]);
+    assert_eq!(
+        o.code,
+        1,
+        "a missing repo dir must fail the run:\n{}",
+        o.all()
+    );
+    assert_contains(&o.all(), "no such directory");
+}
+
+#[test]
+fn stamp_no_post_clone_skips() {
+    let r = repo_with_remote("stamp-skip", "main");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n[[repo]]\ndir = '{}'\n",
+        r.work.display()
+    );
+    let cf = write_conf(&r.work, "stamp.toml", &conf);
+    let o = gkit(&r.work, &["stamp", &cf, "-y"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_contains(&o.stdout, "no post-clone hooks");
+}
+
+#[test]
+fn stamp_bare_errors() {
+    // stamp is conf-only (the conf is the source of truth for per-repo baseBranch).
+    let d = temp_dir("stamp-bare");
+    let o = gkit(&d, &["stamp"]);
+    assert_contains(&o.stderr, "need at least one conf file");
+    assert_eq!(o.code, 2);
+}
