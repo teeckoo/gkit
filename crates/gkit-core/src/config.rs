@@ -132,6 +132,16 @@ pub fn resolve_allow_diverged(git: &dyn Git, dir: &Path) -> bool {
     o.success && o.trimmed() == "true"
 }
 
+/// The repo's local `gkit.conf` — the **absolute conf path** `gkit clone` (and a
+/// conf-mode `gkit stamp`) stamps so `gkit stamp` (run inside the repo, no arg) can
+/// find the conf that drives it. `None` when unset or empty. Read with `--local`
+/// deliberately: `gkit.conf` is a per-repo fact, never inherited from `--global`.
+pub fn resolve_conf(git: &dyn Git, dir: &Path) -> Option<String> {
+    let o = git.run(dir, &["config", "--local", "--get", "gkit.conf"]);
+    let v = o.trimmed();
+    (o.success && !v.is_empty()).then(|| v.to_string())
+}
+
 /// Current branch, or `None` if HEAD is detached (no symbolic ref).
 pub fn current_branch_opt(git: &dyn Git, dir: &Path) -> Option<String> {
     let o = git.run(dir, &["symbolic-ref", "--short", "HEAD"]);
@@ -275,6 +285,31 @@ mod tests {
             &FakeGit::new().ok("config --get --bool gkit.allowDiverged", "false"),
             d()
         ));
+    }
+
+    #[test]
+    fn resolve_conf_reads_local_or_none() {
+        // set -> Some(absolute path)
+        assert_eq!(
+            resolve_conf(
+                &FakeGit::new().ok("config --local --get gkit.conf", "/abs/repos.toml"),
+                d()
+            ),
+            Some("/abs/repos.toml".into())
+        );
+        // unset (failing) -> None
+        assert_eq!(
+            resolve_conf(&FakeGit::new().fail("config --local --get gkit.conf"), d()),
+            None
+        );
+        // success but empty -> None
+        assert_eq!(
+            resolve_conf(
+                &FakeGit::new().ok("config --local --get gkit.conf", ""),
+                d()
+            ),
+            None
+        );
     }
 
     #[test]

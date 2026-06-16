@@ -13,4 +13,5 @@
   - [stamp](./commands/stamp.md)
   - [logoff](./commands/logoff.md)
   - [stmb](./commands/stmb.md)
+  - [fixsub](./commands/fixsub.md)
 - [Design principles](./design.md)

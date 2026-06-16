@@ -862,7 +862,7 @@ fn stamp_runs_post_clone_config() {
         r.work.display()
     );
     let cf = write_conf(&r.work, "stamp.toml", &conf);
-    let o = gkit(&r.work, &["stamp", &cf, "-y"]);
+    let o = gkit(&r.work, &["stamp", "--conf", &cf, "-y"]);
     assert_eq!(o.code, 0, "stamp should succeed:\n{}", o.all());
     assert_contains(&o.stdout, "stamped");
     // The repo now carries the stamped git config the gate reads.
@@ -901,7 +901,7 @@ fn stamp_recurses_into_submodules() {
         sup.work.display()
     );
     let cf = write_conf(&sup.work, "stamp.toml", &conf);
-    let o = gkit(&sup.work, &["stamp", &cf, "-y"]);
+    let o = gkit(&sup.work, &["stamp", "--conf", &cf, "-y"]);
     assert_eq!(o.code, 0, "{}", o.all());
     assert_eq!(
         git(&sup.work, &["config", "--local", "gkit.baseBranch"])
@@ -927,9 +927,9 @@ fn stamp_dry_run_changes_nothing() {
         r.work.display()
     );
     let cf = write_conf(&r.work, "stamp.toml", &conf);
-    let o = gkit(&r.work, &["stamp", &cf, "--dry-run"]);
+    let o = gkit(&r.work, &["stamp", "--conf", &cf, "--dry-run"]);
     assert_eq!(o.code, 0, "{}", o.all());
-    assert_contains(&o.stdout, "stamp plan:");
+    assert_contains(&o.stdout, "stamp plan (conf mode)");
     assert_contains(&o.stdout, "git config gkit.baseBranch dev");
     assert!(
         !git(&r.work, &["config", "--local", "gkit.baseBranch"]).ok,
@@ -947,7 +947,7 @@ fn stamp_missing_dir_fails() {
         missing.display()
     );
     let cf = write_conf(&d, "stamp.toml", &conf);
-    let o = gkit(&d, &["stamp", &cf, "-y"]);
+    let o = gkit(&d, &["stamp", "--conf", &cf, "-y"]);
     assert_eq!(
         o.code,
         1,
@@ -965,16 +965,325 @@ fn stamp_no_post_clone_skips() {
         r.work.display()
     );
     let cf = write_conf(&r.work, "stamp.toml", &conf);
-    let o = gkit(&r.work, &["stamp", &cf, "-y"]);
+    let o = gkit(&r.work, &["stamp", "--conf", &cf, "-y"]);
     assert_eq!(o.code, 0, "{}", o.all());
     assert_contains(&o.stdout, "no post-clone hooks");
 }
 
 #[test]
-fn stamp_bare_errors() {
-    // stamp is conf-only (the conf is the source of truth for per-repo baseBranch).
-    let d = temp_dir("stamp-bare");
-    let o = gkit(&d, &["stamp"]);
+fn stamp_conf_no_paths_errors() {
+    // conf-mode still requires explicit conf file(s), like `logoff --conf`.
+    let d = temp_dir("stamp-conf-bare");
+    let o = gkit(&d, &["stamp", "--conf"]);
     assert_contains(&o.stderr, "need at least one conf file");
     assert_eq!(o.code, 2);
+}
+
+#[test]
+fn stamp_no_arg_in_non_git_dir_fails() {
+    // No arg = repo-mode on cwd; a non-git dir fails clearly (not a silent pass).
+    // `-y` skips the confirm so the authoritative run executes.
+    let d = temp_dir("stamp-bare");
+    let o = gkit(&d, &["stamp", "-y"]);
+    assert_contains(&o.all(), "not a git repository");
+    assert_eq!(o.code, 1);
+}
+
+// ---------------------------------------------------------------- stamp repo-mode + back-fill
+
+#[test]
+fn stamp_repo_mode_uses_repo_conf() {
+    // gkit.conf points stamp at the conf; no-arg run inside the repo re-applies it.
+    let r = repo_with_remote("stamp-repo", "main");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git config gkit.baseBranch dev\"]\n[[repo]]\ndir = '{}'\n",
+        r.work.display()
+    );
+    let cf = write_conf(&r.work, "stamp.toml", &conf);
+    let abs = std::fs::canonicalize(&cf).unwrap();
+    git_ok(&r.work, &["config", "gkit.conf", abs.to_str().unwrap()]);
+    let o = gkit(&r.work, &["stamp", "-y"]); // no path arg → cwd repo-mode
+    assert_eq!(o.code, 0, "repo-mode should succeed:\n{}", o.all());
+    assert_contains(&o.stdout, "stamped");
+    assert_eq!(
+        git(&r.work, &["config", "--local", "gkit.baseBranch"])
+            .stdout
+            .trim(),
+        "dev"
+    );
+}
+
+#[test]
+fn stamp_repo_mode_dir_arg() {
+    // A directory arg (rejected in v0.8.0) is now a valid repo path.
+    let r = repo_with_remote("stamp-repo-dir", "main");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git config gkit.baseBranch dev\"]\n[[repo]]\ndir = '{}'\n",
+        r.work.display()
+    );
+    let cf = write_conf(&r.work, "stamp.toml", &conf);
+    let abs = std::fs::canonicalize(&cf).unwrap();
+    git_ok(&r.work, &["config", "gkit.conf", abs.to_str().unwrap()]);
+    let d = temp_dir("stamp-elsewhere");
+    let o = gkit(&d, &["stamp", "-y", r.work.to_str().unwrap()]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_eq!(
+        git(&r.work, &["config", "--local", "gkit.baseBranch"])
+            .stdout
+            .trim(),
+        "dev"
+    );
+}
+
+#[test]
+fn stamp_repo_mode_unset_conf_fails() {
+    // No gkit.conf set → repo-mode fails with an actionable hint.
+    let r = repo_with_remote("stamp-noconf", "main");
+    let o = gkit(&r.work, &["stamp", "-y"]);
+    assert_eq!(o.code, 1, "unset gkit.conf must fail:\n{}", o.all());
+    assert_contains(&o.all(), "gkit.conf not set");
+    assert_contains(&o.all(), "gkit stamp --conf");
+}
+
+#[test]
+fn stamp_repo_mode_dry_run_changes_nothing() {
+    let r = repo_with_remote("stamp-repo-dry", "main");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git config gkit.baseBranch dev\"]\n[[repo]]\ndir = '{}'\n",
+        r.work.display()
+    );
+    let cf = write_conf(&r.work, "stamp.toml", &conf);
+    let abs = std::fs::canonicalize(&cf).unwrap();
+    git_ok(&r.work, &["config", "gkit.conf", abs.to_str().unwrap()]);
+    let o = gkit(&r.work, &["stamp", "--dry-run"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_contains(&o.stdout, "stamp plan (repo mode)");
+    assert!(
+        !git(&r.work, &["config", "--local", "gkit.baseBranch"]).ok,
+        "dry-run must not write config"
+    );
+}
+
+#[test]
+fn stamp_repo_mode_recurses_via_hook() {
+    // Repo-mode honors the conf's `submodule foreach --recursive` post-clone hook.
+    let sup = repo_with_remote("stamp-repo-sup", "main");
+    add_submodule(&sup.work, "stamp-repo-sub", "child");
+    let child = sup.work.join("child");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git config gkit.baseBranch dev\", \
+         \"git submodule foreach --recursive 'git config gkit.baseBranch dev'\"]\n\
+         [[repo]]\ndir = '{}'\n",
+        sup.work.display()
+    );
+    let cf = write_conf(&sup.work, "stamp.toml", &conf);
+    let abs = std::fs::canonicalize(&cf).unwrap();
+    git_ok(&sup.work, &["config", "gkit.conf", abs.to_str().unwrap()]);
+    let o = gkit(&sup.work, &["stamp", "-y"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_eq!(
+        git(&child, &["config", "--local", "gkit.baseBranch"])
+            .stdout
+            .trim(),
+        "dev"
+    );
+}
+
+#[test]
+fn stamp_conf_mode_backfills_gkit_conf() {
+    // conf-mode sets gkit.conf (absolute) where missing, never overwriting.
+    let r = repo_with_remote("stamp-backfill", "main");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n[[repo]]\ndir = '{}'\n",
+        r.work.display()
+    );
+    let cf = write_conf(&r.work, "stamp.toml", &conf);
+    assert!(
+        !git(&r.work, &["config", "--local", "gkit.conf"]).ok,
+        "starts with no gkit.conf"
+    );
+    let o = gkit(&r.work, &["stamp", "--conf", &cf, "-y"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    let abs = std::fs::canonicalize(&cf).unwrap();
+    assert_eq!(
+        git(&r.work, &["config", "--local", "gkit.conf"])
+            .stdout
+            .trim(),
+        abs.to_str().unwrap(),
+        "gkit.conf back-filled to the absolute conf path"
+    );
+    // A second run does not change it (idempotent / never overwrites).
+    let _ = gkit(&r.work, &["stamp", "--conf", &cf, "-y"]);
+    assert_eq!(
+        git(&r.work, &["config", "--local", "gkit.conf"])
+            .stdout
+            .trim(),
+        abs.to_str().unwrap()
+    );
+}
+
+// ---------------------------------------------------------------- fixsub
+
+#[test]
+fn fixsub_switches_detached_submodule_to_branch() {
+    // A detached submodule (à la `submodule update --init`) is switched back onto
+    // its branch (.gitmodules has no `branch=`, so SUBMODULE_SWITCH falls back to main).
+    let sup = repo_with_remote("fixsub-sup", "main");
+    add_submodule(&sup.work, "fixsub-sub", "child");
+    let child = sup.work.join("child");
+    detach_submodule(&child);
+    assert!(
+        !git(&child, &["symbolic-ref", "--short", "HEAD"]).ok,
+        "precondition: submodule is detached"
+    );
+    let o = gkit(&sup.work, &["fixsub", "-y"]);
+    assert_eq!(o.code, 0, "fixsub should succeed:\n{}", o.all());
+    assert_eq!(
+        git(&child, &["symbolic-ref", "--short", "HEAD"])
+            .stdout
+            .trim(),
+        "main",
+        "submodule is back on its branch"
+    );
+}
+
+#[test]
+fn fixsub_inherits_identity_when_submodule_lacks_one() {
+    let sup = repo_with_remote("fixsub-id", "main");
+    add_submodule(&sup.work, "fixsub-id-sub", "child");
+    let child = sup.work.join("child");
+    git_ok(&sup.work, &["config", "user.name", "Root Dev"]);
+    git_ok(&sup.work, &["config", "user.email", "root@example.com"]);
+    assert!(
+        !git(&child, &["config", "--local", "user.name"]).ok,
+        "precondition: submodule has no local identity"
+    );
+    let o = gkit(&sup.work, &["fixsub", "-y"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_eq!(
+        git(&child, &["config", "--local", "user.name"])
+            .stdout
+            .trim(),
+        "Root Dev"
+    );
+    assert_eq!(
+        git(&child, &["config", "--local", "user.email"])
+            .stdout
+            .trim(),
+        "root@example.com"
+    );
+}
+
+#[test]
+fn fixsub_does_not_clobber_existing_submodule_identity() {
+    // Key safety test: a deliberately-different submodule identity survives.
+    let sup = repo_with_remote("fixsub-noclobber", "main");
+    add_submodule(&sup.work, "fixsub-noclobber-sub", "child");
+    let child = sup.work.join("child");
+    git_ok(&sup.work, &["config", "user.name", "Root Dev"]);
+    git_ok(&sup.work, &["config", "user.email", "root@example.com"]);
+    git_ok(&child, &["config", "user.name", "Sub Owner"]);
+    git_ok(&child, &["config", "user.email", "sub@example.com"]);
+    let o = gkit(&sup.work, &["fixsub", "-y"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_eq!(
+        git(&child, &["config", "--local", "user.name"])
+            .stdout
+            .trim(),
+        "Sub Owner",
+        "submodule's own identity is not clobbered"
+    );
+}
+
+#[test]
+fn fixsub_dry_run_changes_nothing() {
+    let sup = repo_with_remote("fixsub-dry", "main");
+    add_submodule(&sup.work, "fixsub-dry-sub", "child");
+    let child = sup.work.join("child");
+    detach_submodule(&child);
+    let o = gkit(&sup.work, &["fixsub", "--dry-run"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_contains(&o.stdout, "fixsub plan:");
+    assert_contains(&o.stdout, "submodule foreach --recursive");
+    assert!(
+        !git(&child, &["symbolic-ref", "--short", "HEAD"]).ok,
+        "dry-run must not re-attach the submodule"
+    );
+}
+
+#[test]
+fn fixsub_idempotent() {
+    let sup = repo_with_remote("fixsub-idem", "main");
+    add_submodule(&sup.work, "fixsub-idem-sub", "child");
+    let child = sup.work.join("child");
+    detach_submodule(&child);
+    assert_eq!(gkit(&sup.work, &["fixsub", "-y"]).code, 0);
+    let o = gkit(&sup.work, &["fixsub", "-y"]); // second run
+    assert_eq!(o.code, 0, "idempotent re-run:\n{}", o.all());
+    assert_eq!(
+        git(&child, &["symbolic-ref", "--short", "HEAD"])
+            .stdout
+            .trim(),
+        "main"
+    );
+}
+
+#[test]
+fn fixsub_non_git_dir_fails() {
+    let d = temp_dir("fixsub-nongit");
+    let o = gkit(&d, &["fixsub", "-y", d.to_str().unwrap()]);
+    assert_contains(&o.all(), "not a git repository");
+    assert_eq!(o.code, 1);
+}
+
+// ---------------------------------------------------------------- nested submodules
+
+#[test]
+fn fixsub_recurses_into_nested_submodules() {
+    // super → mid → leaf. Detach the DEPTH-2 leaf; `foreach --recursive` must reach it.
+    let sup = repo_with_remote("fixsub-deep", "main");
+    let leaf = add_nested_submodule(&sup.work, "fixsub-deep", "mid", "leaf");
+    detach_submodule(&leaf);
+    assert!(
+        !git(&leaf, &["symbolic-ref", "--short", "HEAD"]).ok,
+        "precondition: nested leaf is detached"
+    );
+    let o = gkit(&sup.work, &["fixsub", "-y"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_eq!(
+        git(&leaf, &["symbolic-ref", "--short", "HEAD"])
+            .stdout
+            .trim(),
+        "main",
+        "depth-2 nested submodule switched back to its branch"
+    );
+}
+
+#[test]
+fn stamp_repo_mode_recurses_into_nested_submodules() {
+    // The conf's `foreach --recursive` post-clone hook must reach the depth-2 leaf.
+    let sup = repo_with_remote("stamp-deep", "main");
+    let leaf = add_nested_submodule(&sup.work, "stamp-deep", "mid", "leaf");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git submodule foreach --recursive 'git config gkit.baseBranch dev'\"]\n\
+         [[repo]]\ndir = '{}'\n",
+        sup.work.display()
+    );
+    let cf = write_conf(&sup.work, "stamp.toml", &conf);
+    let abs = std::fs::canonicalize(&cf).unwrap();
+    git_ok(&sup.work, &["config", "gkit.conf", abs.to_str().unwrap()]);
+    let o = gkit(&sup.work, &["stamp", "-y"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert_eq!(
+        git(&leaf, &["config", "--local", "gkit.baseBranch"])
+            .stdout
+            .trim(),
+        "dev",
+        "depth-2 nested submodule got config via foreach --recursive"
+    );
 }

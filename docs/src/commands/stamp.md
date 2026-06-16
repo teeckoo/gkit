@@ -7,12 +7,20 @@ on repos that are **already on disk** — no cloning, no fetching.
 ## Synopsis
 
 ```sh
-gkit stamp <conf…> [--dry-run] [-y|--yes]
+gkit stamp [paths…] [--dry-run] [-y|--yes]     # repo-mode (default)
+gkit stamp --conf <conf…> [--dry-run] [-y]     # conf-mode
 ```
 
-`conf…` are **explicit conf file(s)** — the same rule as
-[`clone`](./clone.md): at least one is required and a directory is rejected (use a
-shell glob like `confs/*.toml`). `gkit stamp` with no conf is an error.
+Two modes, with the same `--conf` shape as [`logoff`](./logoff.md):
+
+- **repo-mode (default):** the positional `paths` are **repo paths** (default: the
+  current directory). Each repo reads its own `gkit.conf` git-config key — the
+  absolute conf path that `clone` (or a prior conf-mode run) stamped — to find the
+  conf that drives it, and re-applies that repo's `post-clone`. **Fails clearly if
+  `gkit.conf` is unset** rather than guessing.
+- **conf-mode (`--conf`):** the positional args are **conf file(s)** (explicit
+  files, same rule as `clone`). Re-applies each conf to every repo it lists, **and
+  back-fills `gkit.conf`** (set-if-unset) so those repos become usable in repo-mode.
 
 ## Why it exists
 
@@ -33,67 +41,54 @@ But `clone` runs that **once**, over the submodules that existed *then*. A submo
 added **later** — e.g. on a feature branch that pins a new submodule — is never
 stamped: it comes up with no `gkit.baseBranch` (so [`logoff`](./logoff.md)'s base
 falls back to `origin/main`/`master`) and no `gkit.solo` (so it uses the team rule).
-`gkit stamp <conf>` re-runs the conf's `post-clone` over the existing repos so those
-values converge. It's safe to re-run: the hooks are `git config` writes, which are
-idempotent.
+Re-running `stamp` re-applies the conf's `post-clone` so those values converge. It's
+safe to re-run: the hooks are `git config` writes, which are idempotent. (A submodule
+must be **initialized** for the `submodule foreach` to reach it — run
+`git submodule update --init` first, then [`gkit fixsub`](./fixsub.md) to un-detach
+it.)
 
 ## What it does
 
-1. Read + validate every conf (a conf that fails is reported and skipped; the rest
-   still run, and the exit code is non-zero if anything failed).
-2. **Print the plan**: each repo's dir and the `post-clone` commands that would run.
-   With `--dry-run`, stop here.
-3. Confirm (skip with `-y`).
-4. Per repo, in conf order: a **missing dir or non-git dir fails** (never a silent
-   skip — you want to know); a repo with **no `post-clone` is skipped**; otherwise
-   the hooks run in the repo dir, each printed `+ <cmd>`, with the same `$GKIT_*`
-   env [`clone`](./clone.md) sets.
+**repo-mode** (per repo path / cwd): resolve the repo's own `gkit.conf`; parse that
+conf; find the `[[repo]]` whose `dir` matches this repo (else fall back to the conf's
+global `post-clone`); print the plan; confirm (skip with `-y`); run the hooks in the
+repo dir. A repo with **no `gkit.conf`** fails with an actionable hint; a non-git dir
+fails.
 
-`stamp` does **not** clone, fetch, run `pre-clone`, or run clone's built-ins
-(submodule branch-switch, `direnv allow`). Git **identity** is a `clone` concern, so
+**conf-mode** (`--conf`): read + validate every conf; print the plan; confirm; per
+repo (in conf order) **back-fill `gkit.conf`** where missing, then run the effective
+`post-clone`. A missing/non-git dir fails; a repo with no hooks is skipped.
+
+`stamp` does **not** clone, fetch, run `pre-clone`, or run clone's built-ins. Git
+**identity** and the submodule **branch-switch** are not `stamp`'s job — identity is a
+`clone` concern, and the branch-switch lives in [`gkit fixsub`](./fixsub.md). So
 `$GKIT_USER_NAME`/`$GKIT_USER_EMAIL` are empty under `stamp`.
-
-## Conf-only (no in-repo mode)
-
-Unlike `logoff`/`stmb`, `stamp` always takes a conf and has no path mode. The conf
-is the source of truth for each repo's *intended* values — and those differ per
-submodule (one repo's base is `dev`, another's is `main`). Without it there's no
-correct value to write to a freshly-added submodule, so `stamp` requires the conf
-rather than guessing.
 
 ## Flags
 
 | Flag | Effect |
 |---|---|
-| `--dry-run` | Print the plan (repos + hooks) without changing anything. |
+| `--conf` | Treat the args as clone conf file(s) (conf-mode) and back-fill `gkit.conf`. Without it, stamp is repo-mode. |
+| `--dry-run` | Print the plan without changing anything. |
 | `-y, --yes` | Skip the confirmation prompt. |
 
 ## Example
 
-```toml
-# repos.toml
-host      = "tlbb"
-namespace = "example-org"
-post-clone = [
-  "git config gkit.baseBranch dev",
-  "git submodule foreach --recursive 'git config gkit.baseBranch dev'",
-]
-
-[[repo]]
-dir = "$HOME/work/superproject"
-```
-
 ```text
-$ gkit stamp repos.toml -y
-stamp plan:
+# conf-mode: re-apply + stamp gkit.conf on each repo
+$ gkit stamp --conf repos.toml -y
+stamp plan (conf mode):
   superproject  (/home/you/work/superproject):
     + git config gkit.baseBranch dev
-    + git submodule foreach --recursive 'git config gkit.baseBranch dev'
++ git config gkit.conf /home/you/confs/repos.toml  (/home/you/work/superproject)
 + git config gkit.baseBranch dev
-+ git submodule foreach --recursive 'git config gkit.baseBranch dev'
-Entering 'new-child'
+stamped  superproject                 /home/you/work/superproject
+
+# later, from inside the repo — no conf needed (reads gkit.conf):
+$ cd /home/you/work/superproject && gkit stamp -y
+stamp plan (repo mode):
+  /home/you/work/superproject  (conf: /home/you/confs/repos.toml)
+    + git config gkit.baseBranch dev
++ git config gkit.baseBranch dev
 stamped  superproject                 /home/you/work/superproject
 ```
-
-After `stamp`, the newly-pinned `new-child` submodule carries `gkit.baseBranch=dev`,
-so `gkit logoff` resolves its base correctly.

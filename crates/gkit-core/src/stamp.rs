@@ -17,6 +17,7 @@
 
 use crate::clone::run_hooks;
 use crate::conf::{expand_path, CloneConf, Repo};
+use crate::config;
 use crate::git::Git;
 use std::path::{Path, PathBuf};
 
@@ -117,6 +118,160 @@ pub fn stamp_all<G: Git>(git: &G, conf: &CloneConf) -> Vec<StampReport> {
         .collect()
 }
 
+/// Find the `[[repo]]` whose `expand_path(dir)` canonicalizes to `repo_dir`.
+/// Matching on canonicalized paths absorbs `$VAR`/`~` expansion, symlinks, and
+/// trailing-slash differences. `repo_dir` must already be canonicalized.
+pub fn match_repo<'a>(conf: &'a CloneConf, repo_dir: &Path) -> Option<&'a Repo> {
+    conf.repo.iter().find(|r| {
+        let d = expand_path(&r.dir, |k| std::env::var(k).ok());
+        std::fs::canonicalize(&d)
+            .map(|c| c == *repo_dir)
+            .unwrap_or(false)
+    })
+}
+
+/// What a repo-mode stamp resolved: the conf it came from, the hooks to run, whether
+/// a `[[repo]]` matched (false → global `post-clone` only), and the `$GKIT_*` env
+/// bits (empty when unmatched).
+pub struct RepoPlan {
+    pub conf_path: String,
+    pub hooks: Vec<String>,
+    pub matched: bool,
+    pub env_repo: String,
+    pub env_url: String,
+    pub env_host: String,
+    pub env_namespace: String,
+}
+
+/// Resolve a repo's own `gkit.conf`, parse it, and compute the hooks to run in this
+/// repo (the matched `[[repo]]`'s effective post-clone, else the conf's global
+/// post-clone). `Err` when `gkit.conf` is unset (actionable) or the conf can't be
+/// read/parsed. `repo_dir` must already be canonicalized by the caller.
+pub fn plan_repo<G: Git>(git: &G, repo_dir: &Path) -> Result<RepoPlan, String> {
+    let conf_path = config::resolve_conf(git, repo_dir).ok_or_else(|| {
+        format!(
+            "gkit.conf not set in {}; run `gkit stamp --conf <conf>` once to back-fill, or pass the conf",
+            repo_dir.display()
+        )
+    })?;
+    let text = std::fs::read_to_string(&conf_path)
+        .map_err(|e| format!("cannot read gkit.conf `{conf_path}`: {e}"))?;
+    let cfg = crate::conf::parse(&text).map_err(|e| format!("{conf_path}: {e}"))?;
+
+    let basename = repo_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| repo_dir.display().to_string());
+    match match_repo(&cfg, repo_dir) {
+        Some(r) => {
+            let host = cfg.host.clone();
+            let ns = cfg.namespace_for(r).unwrap_or_default().to_string();
+            let repo = r.name();
+            let url = format!("{host}:{ns}/{repo}.git");
+            Ok(RepoPlan {
+                conf_path,
+                hooks: effective_post_clone(&cfg, r),
+                matched: true,
+                env_repo: repo,
+                env_url: url,
+                env_host: host,
+                env_namespace: ns,
+            })
+        }
+        None => Ok(RepoPlan {
+            conf_path,
+            hooks: cfg.post_clone.0.clone(),
+            matched: false,
+            env_repo: basename,
+            env_url: String::new(),
+            env_host: String::new(),
+            env_namespace: String::new(),
+        }),
+    }
+}
+
+/// Repo-mode stamp: resolve the repo's own `gkit.conf` ([`plan_repo`]) and run its
+/// hooks in `repo_dir`, with the same `$GKIT_*` env shape `clone`/`stamp_all` use
+/// (identity vars empty — identity is a `clone`/`fixsub` concern). `repo_dir` must
+/// already be canonicalized.
+pub fn stamp_repo<G: Git>(git: &G, repo_dir: &Path) -> StampReport {
+    let dir_s = repo_dir.display().to_string();
+    let basename = repo_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| dir_s.clone());
+    let mk = |name: &str, outcome| StampReport {
+        name: name.to_string(),
+        dir: repo_dir.to_path_buf(),
+        outcome,
+    };
+
+    if !is_git_repo(git, repo_dir) {
+        let e = "not a git repository".to_string();
+        println!("FAILED   {basename:<28} {dir_s} ({e})");
+        return mk(&basename, Outcome::Failed(e));
+    }
+    let plan = match plan_repo(git, repo_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("FAILED   {basename:<28} {e}");
+            return mk(&basename, Outcome::Failed(e));
+        }
+    };
+    if !plan.matched {
+        println!(
+            "note: {dir_s} not listed in {} — running global post-clone only",
+            plan.conf_path
+        );
+    }
+    if plan.hooks.is_empty() {
+        println!(
+            "skipped  {:<28} {dir_s} (no post-clone hooks)",
+            plan.env_repo
+        );
+        return mk(&plan.env_repo, Outcome::Skipped);
+    }
+    let env = [
+        ("GKIT_REPO", plan.env_repo.as_str()),
+        ("GKIT_DIR", dir_s.as_str()),
+        ("GKIT_URL", plan.env_url.as_str()),
+        ("GKIT_HOST", plan.env_host.as_str()),
+        ("GKIT_NAMESPACE", plan.env_namespace.as_str()),
+        ("GKIT_USER_NAME", ""),
+        ("GKIT_USER_EMAIL", ""),
+    ];
+    if let Err(e) = run_hooks(&plan.hooks, repo_dir, &env) {
+        println!("FAILED   {:<28} {e}", plan.env_repo);
+        return mk(&plan.env_repo, Outcome::Failed(e));
+    }
+    println!("stamped  {:<28} {dir_s}", plan.env_repo);
+    mk(&plan.env_repo, Outcome::Stamped)
+}
+
+/// Conf-mode back-fill: set `gkit.conf` (the absolute conf path) on each `[[repo]]`
+/// that is a git repo and lacks it. **Never overwrites** an existing value (one-way
+/// migration; idempotent). Prints each `git config` it runs. Non-fatal — a set
+/// failure is warned but doesn't fail the run (the post-clone stamp is the job).
+pub fn backfill_conf<G: Git>(git: &G, conf: &CloneConf, abs_conf_path: &str) {
+    for r in &conf.repo {
+        let dir_s = expand_path(&r.dir, |k| std::env::var(k).ok());
+        let dir = PathBuf::from(&dir_s);
+        if !dir.exists() || !is_git_repo(git, &dir) {
+            continue;
+        }
+        if config::resolve_conf(git, &dir).is_none() {
+            println!("+ git config gkit.conf {abs_conf_path}  ({dir_s})");
+            let out = git.run(&dir, &["config", "gkit.conf", abs_conf_path]);
+            if !out.success {
+                println!(
+                    "warning: could not set gkit.conf in {dir_s}: {}",
+                    out.stderr.trim()
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +316,24 @@ mod tests {
                 "git config gkit.baseBranch dev"
             ]
         );
+    }
+
+    #[test]
+    fn match_repo_by_canonical_dir() {
+        // A [[repo]] dir matches when it canonicalizes to the queried repo path; a
+        // dir not listed in the conf returns None.
+        let base = std::env::temp_dir().join(format!("gkit-match-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("a");
+        let b = base.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let c = conf(&[], vec![repo(a.to_str().unwrap(), &[])]);
+        let a_canon = std::fs::canonicalize(&a).unwrap();
+        let b_canon = std::fs::canonicalize(&b).unwrap();
+        assert!(match_repo(&c, &a_canon).is_some(), "listed dir matches");
+        assert!(match_repo(&c, &b_canon).is_none(), "unlisted dir → None");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

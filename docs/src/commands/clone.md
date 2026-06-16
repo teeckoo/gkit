@@ -33,9 +33,12 @@ rest still run and the exit code is non-zero if anything failed.
 3. **Git identity** → `git config user.name`/`user.email` on the repo **and every
    submodule** (recursive — a submodule is its own repo with its own config), if
    resolved (see below; printed, since the values are your explicit input).
-4. **Submodules** → init + switch each onto its `.gitmodules` branch
+4. **`gkit.conf`** → `git config gkit.conf <absolute conf path>` on the repo, so a
+   later [`gkit stamp`](./stamp.md) run *inside* the repo (no arg) can find the conf
+   that drives it. (Older clones get this back-filled by `gkit stamp --conf`.)
+5. **Submodules** → init + switch each onto its `.gitmodules` branch
    (`--no-submodule-branch` to skip).
-5. **`.envrc`** → `direnv allow` (trust-only, no evaluation; `--no-direnv` to skip).
+6. **`.envrc`** → `direnv allow` (trust-only, no evaluation; `--no-direnv` to skip).
 
 ## Git identity (`--user-name` / `--user-email`)
 

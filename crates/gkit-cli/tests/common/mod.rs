@@ -176,6 +176,54 @@ pub fn add_submodule(super_work: &Path, sub_tag: &str, path_in_super: &str) -> P
     sub.bare
 }
 
+/// Build a depth-2 submodule chain `super_work` → `mid_path` → `leaf_path`: the
+/// mid-level repo itself contains the leaf as a submodule, so the leaf is a
+/// submodule-of-a-submodule. Returns the leaf's working path inside the superproject
+/// (`super_work/mid_path/leaf_path`).
+pub fn add_nested_submodule(
+    super_work: &Path,
+    tag: &str,
+    mid_path: &str,
+    leaf_path: &str,
+) -> PathBuf {
+    let leaf = repo_with_remote(&format!("{tag}-leaf"), "main");
+    let mid = repo_with_remote(&format!("{tag}-mid"), "main");
+    let leaf_url = file_url(&leaf.bare);
+    let mid_url = file_url(&mid.bare);
+    let af = "protocol.file.allow=always";
+
+    // mid contains leaf
+    git_ok(
+        &mid.work,
+        &["-c", af, "submodule", "add", &leaf_url, leaf_path],
+    );
+    git_ok(&mid.work.join(leaf_path), &["checkout", "main"]);
+    git_ok(&mid.work, &["commit", "-m", "add leaf"]);
+    git_ok(&mid.work, &["push", "origin", "HEAD"]);
+
+    // super contains mid (and, recursively, leaf)
+    git_ok(
+        super_work,
+        &["-c", af, "submodule", "add", &mid_url, mid_path],
+    );
+    git_ok(
+        super_work,
+        &["-c", af, "submodule", "update", "--init", "--recursive"],
+    );
+    git_ok(&super_work.join(mid_path), &["checkout", "main"]);
+    git_ok(super_work, &["commit", "-m", "add mid"]);
+    git_ok(super_work, &["push", "origin", "HEAD"]);
+
+    super_work.join(mid_path).join(leaf_path)
+}
+
+/// Put an initialized submodule into **detached HEAD** at its current commit —
+/// simulating what `git submodule update --init` leaves behind (checks out the
+/// pinned SHA, not a branch).
+pub fn detach_submodule(sub_work: &Path) {
+    git_ok(sub_work, &["checkout", "--detach"]);
+}
+
 /// True if any line of `out` is `<path>\t<check>\t<value>` for `repo` — matched by
 /// the path's **last component** (robust to OS path rendering / canonicalization).
 pub fn has_check(out: &str, repo: &Path, check: &str, value: &str) -> bool {

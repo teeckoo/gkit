@@ -8,6 +8,7 @@ pub mod checks;
 pub mod clone;
 pub mod conf;
 pub mod config;
+pub mod fixsub;
 pub mod git;
 pub mod key;
 pub mod report;

@@ -95,7 +95,20 @@ omitted — see [`gkit clone`](./commands/clone.md).
 
 The `post-clone` hooks run only at clone time. To **re-apply** them over repos that
 already exist (e.g. to stamp `gkit.baseBranch`/`gkit.solo` on a submodule added
-after the initial clone), run [`gkit stamp <conf>`](./commands/stamp.md).
+after the initial clone), run [`gkit stamp`](./commands/stamp.md).
+
+### The `gkit.conf` git-config key
+
+`gkit clone` stamps **`gkit.conf`** — the absolute path of the conf that cloned the
+repo — into each repo's local git config (and [`gkit stamp --conf`](./commands/stamp.md)
+back-fills it on older clones). It lets `gkit stamp` run *inside* a repo with no
+argument: it reads `gkit.conf`, re-parses that conf, and re-applies this repo's
+`post-clone`. The value is an **absolute, machine-local path** — if the tree moves,
+re-anchor it with `git config gkit.conf <new-path>` or `gkit stamp --conf`.
+
+Project-specific config that isn't a gkit concept (e.g. `core.hooksPath .githooks`)
+belongs in `post-clone`, not in a gkit built-in — so `gkit stamp` re-applies it like
+any other hook.
 
 ## Built-in, stateless post-clone
 

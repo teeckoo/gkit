@@ -8,7 +8,7 @@
 
 use clap::{Args, Parser, Subcommand};
 use gkit_core::git::{Git, SystemGit};
-use gkit_core::{checks, clone, conf, config, key, report, stamp, stmb, submodules};
+use gkit_core::{checks, clone, conf, config, fixsub, key, report, stamp, stmb, submodules};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -35,6 +35,9 @@ enum Cmd {
     /// Switch to the base branch, update it, and delete the finished feature branch
     /// — recursively across submodules, with safe (merged-only) deletion.
     Stmb(StmbArgs),
+    /// Fix submodules in a repo tree: switch each onto its .gitmodules branch
+    /// (un-detach) and inherit the root's git identity where a submodule has none.
+    Fixsub(FixsubArgs),
     /// Manage ssh keys / identities (the gkit-owned ~/.ssh/git_users).
     Key(KeyArgs),
 }
@@ -46,6 +49,7 @@ fn main() -> ExitCode {
         Cmd::Stamp(a) => stamp_cmd(a),
         Cmd::Logoff(a) => logoff_cmd(a),
         Cmd::Stmb(a) => stmb_cmd(a),
+        Cmd::Fixsub(a) => fixsub_cmd(a),
         Cmd::Key(a) => key_cmd(a),
     }
 }
@@ -154,13 +158,6 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
     let user_email = resolve_identity(args.user_email, interactive, || {
         prompt_identity("git user.email", git_config_global("user.email"))
     });
-    let opts = clone::Opts {
-        submodule_branch: !args.no_submodule_branch,
-        direnv: !args.no_direnv,
-        user_name,
-        user_email,
-    };
-
     let mut failed = false;
     for conf_path in &confs {
         if confs.len() > 1 {
@@ -188,6 +185,19 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
             failed = true;
             continue;
         }
+        // Stamp the absolute conf path as gkit.conf on each cloned repo so a later
+        // `gkit stamp` (no arg, inside the repo) can resolve this conf. Built per-conf.
+        let abs_conf = std::fs::canonicalize(conf_path)
+            .unwrap_or_else(|_| conf_path.clone())
+            .to_string_lossy()
+            .into_owned();
+        let opts = clone::Opts {
+            submodule_branch: !args.no_submodule_branch,
+            direnv: !args.no_direnv,
+            user_name: user_name.clone(),
+            user_email: user_email.clone(),
+            conf_path: Some(abs_conf),
+        };
         // clone_all prints each step in order (commands, hooks, status).
         let reports = clone::clone_all(&SystemGit, &cfg, &opts);
         if reports
@@ -209,10 +219,17 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
 
 #[derive(Args)]
 struct StampArgs {
-    /// Conf file(s) whose `post-clone` hooks to re-apply to the existing repos
-    /// (e.g. `repos.toml` or `*.toml`). Same explicit-file rule as `clone`.
+    /// Repo path(s) to stamp (default: the current directory) — or, with --conf, the
+    /// clone conf file(s) to read. Repo-mode reads each repo's own `gkit.conf` (set
+    /// by `clone`, or back-filled by a conf-mode run) to find the conf that drives
+    /// it, and re-applies that repo's `post-clone`.
     paths: Vec<String>,
-    /// Print the plan (repos + the hooks that would run) without changing anything.
+    /// Treat the args as clone confs (conf-mode): re-apply each conf to every repo it
+    /// lists, and back-fill `gkit.conf` where missing. Explicit file(s) only (same
+    /// rule as `clone`). Without this, stamp is repo-mode (acts on the path(s)/cwd).
+    #[arg(long)]
+    conf: bool,
+    /// Print the plan without changing anything.
     #[arg(long)]
     dry_run: bool,
     /// Skip the confirmation prompt.
@@ -221,6 +238,17 @@ struct StampArgs {
 }
 
 fn stamp_cmd(args: StampArgs) -> ExitCode {
+    // --conf mirrors `logoff --conf`: positionals are conf files, not repo paths.
+    if args.conf {
+        stamp_conf_mode(args)
+    } else {
+        stamp_repo_mode(args)
+    }
+}
+
+/// Conf-mode: re-apply each conf's `post-clone` to every repo it lists, and back-fill
+/// `gkit.conf` (the absolute conf path) on repos that lack it.
+fn stamp_conf_mode(args: StampArgs) -> ExitCode {
     let confs = match resolve_confs(&args.paths) {
         Ok(c) => c,
         Err(e) => return die(&e),
@@ -246,7 +274,7 @@ fn stamp_cmd(args: StampArgs) -> ExitCode {
     }
 
     // Plan: list each repo and the hooks stamp would run (cwd = the repo dir).
-    println!("stamp plan:");
+    println!("stamp plan (conf mode):");
     for (path, cfg) in &loaded {
         if loaded.len() > 1 {
             println!("== {} ==", path.display());
@@ -255,7 +283,10 @@ fn stamp_cmd(args: StampArgs) -> ExitCode {
             let dir = conf::expand_path(&r.dir, |k| std::env::var(k).ok());
             let hooks = stamp::effective_post_clone(cfg, r);
             if hooks.is_empty() {
-                println!("  {}  ({dir}) -- no post-clone hooks", r.name());
+                println!(
+                    "  {}  ({dir}) -- no post-clone hooks (gkit.conf back-filled)",
+                    r.name()
+                );
             } else {
                 println!("  {}  ({dir}):", r.name());
                 for h in &hooks {
@@ -281,6 +312,13 @@ fn stamp_cmd(args: StampArgs) -> ExitCode {
         if loaded.len() > 1 {
             println!("== {} ==", path.display());
         }
+        // Back-fill gkit.conf (absolute path) on each repo missing it, so a later
+        // `gkit stamp` (no arg, inside the repo) can find this conf.
+        let abs = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.clone())
+            .to_string_lossy()
+            .into_owned();
+        stamp::backfill_conf(&SystemGit, cfg, &abs);
         let reports = stamp::stamp_all(&SystemGit, cfg);
         if reports
             .iter()
@@ -290,6 +328,57 @@ fn stamp_cmd(args: StampArgs) -> ExitCode {
         }
     }
 
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Repo-mode: act on the given repo path(s) (default cwd), each resolving its own
+/// `gkit.conf`. Fails a repo whose `gkit.conf` is unset (with an actionable hint).
+fn stamp_repo_mode(args: StampArgs) -> ExitCode {
+    let git = SystemGit;
+    let srcs: Vec<String> = if args.paths.is_empty() {
+        vec![".".into()]
+    } else {
+        args.paths.clone()
+    };
+    let dirs: Vec<PathBuf> = srcs.iter().map(|p| canonical(p)).collect();
+
+    // Plan: resolve each repo's gkit.conf + the hooks it would run.
+    println!("stamp plan (repo mode):");
+    for dir in &dirs {
+        match stamp::plan_repo(&git, dir) {
+            Ok(plan) => {
+                println!("  {}  (conf: {})", dir.display(), plan.conf_path);
+                if plan.hooks.is_empty() {
+                    println!("    -- no post-clone hooks");
+                } else {
+                    for h in &plan.hooks {
+                        println!("    + {h}");
+                    }
+                }
+            }
+            Err(e) => println!("  {}  -- {e}", dir.display()),
+        }
+    }
+
+    if args.dry_run {
+        return ExitCode::SUCCESS;
+    }
+    if !args.yes && !confirm("Proceed?") {
+        println!("aborted.");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut failed = false;
+    for dir in &dirs {
+        let report = stamp::stamp_repo(&git, dir);
+        if matches!(report.outcome, stamp::Outcome::Failed(_)) {
+            failed = true;
+        }
+    }
     if failed {
         ExitCode::FAILURE
     } else {
@@ -578,6 +667,53 @@ fn run_stmb(
     }
     let _ = run(&["remote", "prune", "origin"]);
     Ok(())
+}
+
+// ---------------------------------------------------------------- fixsub
+
+#[derive(Args)]
+struct FixsubArgs {
+    /// Repository path (defaults to the current directory).
+    #[arg(default_value = ".")]
+    path: String,
+    /// Don't `direnv allow` submodules that have an .envrc.
+    #[arg(long)]
+    no_direnv: bool,
+    /// Show the plan without making changes.
+    #[arg(long)]
+    dry_run: bool,
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    yes: bool,
+}
+
+fn fixsub_cmd(args: FixsubArgs) -> ExitCode {
+    let git = SystemGit;
+    let root = canonical(&args.path);
+    let direnv = !args.no_direnv;
+
+    // Plan = a dry-run pass (prints the foreach command without running it). A
+    // non-git root fails the run (exit 1), consistent with logoff/stamp.
+    println!("fixsub plan:");
+    if let fixsub::Outcome::Failed(e) = fixsub::fixsub(&git, &root, true, direnv).outcome {
+        eprintln!("gkit fixsub: {e}");
+        return ExitCode::FAILURE;
+    }
+    if args.dry_run {
+        return ExitCode::SUCCESS;
+    }
+    if !args.yes && !confirm("Proceed?") {
+        println!("aborted.");
+        return ExitCode::SUCCESS;
+    }
+
+    match fixsub::fixsub(&git, &root, false, direnv).outcome {
+        fixsub::Outcome::Failed(e) => {
+            eprintln!("gkit fixsub: {e}");
+            ExitCode::FAILURE
+        }
+        _ => ExitCode::SUCCESS,
+    }
 }
 
 // ---------------------------------------------------------------- key

@@ -44,6 +44,10 @@ pub struct Opts {
     pub user_name: Option<String>,
     /// Git identity stamped on each cloned repo (`git config user.email`).
     pub user_email: Option<String>,
+    /// Absolute path to the conf file driving this clone, stamped as `gkit.conf` on
+    /// each top-level repo so `gkit stamp` (run inside the repo, no arg) can later
+    /// resolve its own conf. `None` (e.g. tests) skips the stamp.
+    pub conf_path: Option<String>,
 }
 
 impl Default for Opts {
@@ -53,15 +57,17 @@ impl Default for Opts {
             direnv: true,
             user_name: None,
             user_email: None,
+            conf_path: None,
         }
     }
 }
 
-const SUBMODULE_SWITCH: &str = "b=$(git config -f \"$toplevel/.gitmodules\" \"submodule.$name.branch\" 2>/dev/null || echo main); git switch \"$b\" 2>/dev/null || true";
+// Also reused by `fixsub` (re-applies this branch-switch over an existing tree).
+pub(crate) const SUBMODULE_SWITCH: &str = "b=$(git config -f \"$toplevel/.gitmodules\" \"submodule.$name.branch\" 2>/dev/null || echo main); git switch \"$b\" 2>/dev/null || true";
 
 /// Single-quote a value for safe interpolation into an `sh -c` command line
-/// (each embedded `'` becomes `'\''`).
-fn sh_squote(s: &str) -> String {
+/// (each embedded `'` becomes `'\''`). Shared with `fixsub`.
+pub(crate) fn sh_squote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -209,6 +215,17 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
                     return mk(Outcome::Failed(e));
                 }
             }
+            // 4a': stamp gkit.conf (absolute conf path) on the superproject so
+            // `gkit stamp` (no arg, run inside this repo) can resolve its conf later.
+            if let Some(cp) = opts.conf_path.as_deref() {
+                println!("+ git config gkit.conf {cp}");
+                let out = git.run(&dir, &["config", "gkit.conf", cp]);
+                if !out.success {
+                    let e = format!("git config gkit.conf failed: {}", out.stderr.trim());
+                    println!("FAILED   {name:<28} {e}");
+                    return mk(Outcome::Failed(e));
+                }
+            }
             // 4b: the same identity into every submodule (recursive) so commits there
             // use it too — a submodule is its own repo with its own config. Runs via
             // `sh -c`, so the values are single-quoted.
@@ -281,6 +298,13 @@ mod tests {
             Some(r"git config user.name 'O'\''Brien'")
         );
         assert_eq!(sh_squote("a b"), "'a b'");
+    }
+
+    #[test]
+    fn opts_default_has_no_conf_path() {
+        // gkit.conf is opt-in: the default (used by tests / non-clone callers)
+        // leaves it unstamped.
+        assert_eq!(super::Opts::default().conf_path, None);
     }
 
     #[test]
