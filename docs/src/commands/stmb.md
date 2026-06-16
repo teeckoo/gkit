@@ -12,18 +12,24 @@ gkit stmb [path] [--base <b>] [--no-recursive] [-y|--yes] [--dry-run]
 
 ## What it does
 
-1. Resolve **one** base branch for the whole tree: `--base` → `git config
-   gkit.baseBranch` → `origin/HEAD`. (Used for every repo, so a submodule's base is
-   never mis-resolved.)
-2. Walk the repo + submodules (post-order) and build a plan per repo:
+1. Resolve each repo's **own** base: `--base` applies to the **root only**; every
+   submodule resolves its own `git config gkit.baseBranch` → `origin/HEAD` (the same
+   per-repo resolution `logoff` uses). This matters for a tree where a submodule tracks
+   a *different* integration branch (e.g. one on `dev` while the root is on `main`): a
+   single tree-wide base would switch that submodule onto the root's base and treat its
+   real base as a deletable feature. A repo whose base can't be resolved is **skipped**
+   (never forced onto another repo's base).
+2. Walk the repo + submodules (post-order) and build a plan per repo, **showing each
+   repo's current branch** (`[on <branch>]`) so a wrong base is obvious before you confirm:
    - on a feature branch → switch to base, pull, **delete the feature if merged**;
-   - already on base → switch/pull only;
+   - already on base → update (pull) only;
    - dirty working tree or detached HEAD → **skip** (reported).
 3. Print the plan. With `--dry-run`, stop here. Otherwise confirm (skip with `-y`).
 4. Execute, **printing each git command** under a per-repo header (transparency,
-   like `clone`): `switch base` → `pull --rebase origin base` → (verify, then) delete
-   feature → `remote prune origin`. (`git switch`, not `checkout`, so a worktree path
-   named like the base — e.g. a `main/` dir — can't make the branch switch ambiguous.)
+   like `clone`): `switch base` (**skipped if already on base** — just pull) →
+   `pull --rebase origin base` → (verify, then) delete feature → `remote prune origin`.
+   (`git switch`, not `checkout`, so a worktree path named like the base — e.g. a `main/`
+   dir — can't make the branch switch ambiguous.)
 5. Automatically run `logoff` (recursive) to confirm everything is clean — after a
    blank line.
 
@@ -69,9 +75,10 @@ is a raw-git operation, not fleet cleanup.
 ## Example
 
 ```text
-$ gkit stmb --yes ~/work/repo          # no --base → base resolved from gkit.baseBranch
-stmb plan (1 repo(s)):
-  .  -> switch to 'main', pull, delete 'feat-x' if merged
+$ gkit stmb --yes ~/work/repo          # no --base → each repo resolves its own base
+stmb plan (2 repo(s)):
+  a-submodule-on-dev  [on dev]  -> update 'dev' (pull)
+  .  [on feat-x]  -> switch to 'main', pull, delete 'feat-x' if merged
 .:
   + git switch main
   + git pull --rebase origin main
@@ -84,7 +91,9 @@ stmb plan (1 repo(s)):
 /home/you/work/repo  main  true
 ```
 
-The base comes from `git config gkit.baseBranch` (then `origin/HEAD`) — pass `--base <b>`
-only to override it for the root, e.g. `gkit stmb --base dev`.
+Each repo resolves its own base from `git config gkit.baseBranch` (then `origin/HEAD`); the
+`[on <branch>]` prefix shows where each repo currently sits. `--base <b>` overrides the base
+for the **root only** (`gkit stmb --base dev`); submodules keep their own — so a submodule
+that tracks `dev` is updated on `dev`, not switched to the root's `main`.
 
 `--dry-run` prints just the plan (the first block) and stops.

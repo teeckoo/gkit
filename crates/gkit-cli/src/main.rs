@@ -606,6 +606,8 @@ struct StmbArgs {
 enum Step {
     Switch {
         dir: PathBuf,
+        /// Current branch (for display); `None` = detached HEAD.
+        current: Option<String>,
         base: String,
         feature: Option<String>,
     },
@@ -624,21 +626,32 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
         submodules::repo_paths(&git, &root)
     };
 
-    // Resolve ONE base for the whole tree (uniform convention) — avoids mis-resolving
-    // a submodule's base and treating an integration branch as a deletable feature.
-    let base = match config::resolve_switch_base(&git, &root, args.base.as_deref()) {
-        Some(b) => b,
-        None => return die("cannot determine base branch — pass --base <branch>"),
-    };
-
+    // Resolve each repo's OWN base — `--base` applies to the **root only**; every
+    // submodule resolves its own `gkit.baseBranch` → `origin/HEAD` (same as `logoff`).
+    // A single tree-wide base would mis-handle a submodule that tracks a different
+    // integration branch (e.g. one on `dev` while the root is on `main`): it would
+    // switch that submodule onto the root's base and treat its real base as a deletable
+    // feature. A repo whose base can't be resolved is skipped (not forced onto another's).
     let steps: Vec<Step> = repos
         .iter()
         .map(|dir| {
+            let is_root = dir == &root;
+            let ovr = if is_root { args.base.as_deref() } else { None };
+            let base = match config::resolve_switch_base(&git, dir, ovr) {
+                Some(b) => b,
+                None => return Step::Skip {
+                    dir: dir.clone(),
+                    why:
+                        "cannot determine base branch (set gkit.baseBranch, or --base for the root)"
+                            .into(),
+                },
+            };
             let cur = config::current_branch_opt(&git, dir);
             let dirty = !checks::committed(&git, dir);
             match stmb::plan(cur.as_deref(), &base, dirty) {
                 Ok(p) => Step::Switch {
                     dir: dir.clone(),
+                    current: cur,
                     base: p.base,
                     feature: p.delete_feature,
                 },
@@ -653,12 +666,23 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
     println!("stmb plan ({} repo(s)):", steps.len());
     for s in &steps {
         match s {
-            Step::Switch { dir, base, feature } => {
-                let del = feature
-                    .as_deref()
-                    .map(|f| format!(", delete '{f}' if merged"))
-                    .unwrap_or_default();
-                println!("  {}  -> switch to '{base}', pull{del}", short(dir, &root));
+            Step::Switch {
+                dir,
+                current,
+                base,
+                feature,
+            } => {
+                let on = current.as_deref().unwrap_or("detached HEAD");
+                // Show the source branch so a wrong base is obvious before confirming.
+                let action = if feature.is_some() {
+                    let f = feature.as_deref().unwrap();
+                    format!("switch to '{base}', pull, delete '{f}' if merged")
+                } else if current.as_deref() == Some(base.as_str()) {
+                    format!("update '{base}' (pull)")
+                } else {
+                    format!("switch to '{base}', pull")
+                };
+                println!("  {}  [on {on}]  -> {action}", short(dir, &root));
             }
             Step::Skip { dir, why } => println!("  {}  -- skip: {why}", short(dir, &root)),
         }
@@ -674,9 +698,15 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
 
     let mut failed = false;
     for s in &steps {
-        if let Step::Switch { dir, base, feature } = s {
+        if let Step::Switch {
+            dir,
+            current,
+            base,
+            feature,
+        } = s
+        {
             println!("{}:", short(dir, &root));
-            if let Err(e) = run_stmb(&git, dir, base, feature.as_deref()) {
+            if let Err(e) = run_stmb(&git, dir, current.as_deref(), base, feature.as_deref()) {
                 eprintln!("gkit stmb: {}: {e}", short(dir, &root));
                 failed = true;
             }
@@ -694,18 +724,28 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
     }
 }
 
-fn run_stmb(git: &SystemGit, dir: &Path, base: &str, feature: Option<&str>) -> Result<(), String> {
+fn run_stmb(
+    git: &SystemGit,
+    dir: &Path,
+    current: Option<&str>,
+    base: &str,
+    feature: Option<&str>,
+) -> Result<(), String> {
     // Print each git command before running it (transparency, like `clone`).
     let run = |args: &[&str]| {
         println!("  + git {}", args.join(" "));
         git.run(dir, args)
     };
-    // `git switch` (not `checkout`): branch-only, so a worktree path matching the base
-    // name (e.g. a `main/` dir) can't make it ambiguous, while keeping the same DWIM
-    // (auto-create a local branch tracking origin/<base> when absent).
-    let co = run(&["switch", base]);
-    if !co.success {
-        return Err(format!("switch to {base} failed: {}", co.stderr.trim()));
+    // Already on base → skip the (redundant) switch, just update. Matches the plan's
+    // "update '<base>' (pull)" line. Otherwise `git switch` (not `checkout`): branch-only,
+    // so a worktree path matching the base name (e.g. a `main/` dir) can't make it
+    // ambiguous, while keeping the same DWIM (auto-create a local branch tracking
+    // origin/<base> when absent).
+    if current != Some(base) {
+        let co = run(&["switch", base]);
+        if !co.success {
+            return Err(format!("switch to {base} failed: {}", co.stderr.trim()));
+        }
     }
     // Update base first, so the merged-ness check sees freshly-pulled history (a
     // squash/rebase merge that just landed on the remote must be present locally).

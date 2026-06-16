@@ -608,6 +608,8 @@ fn stmb_executes_switch_and_delete() {
         &["stmb", "--yes", "--base", "main", r.work.to_str().unwrap()],
     );
     assert_contains(&o.stdout, "+ git switch main");
+    // Plan shows the source branch (the on-<branch> the wrong-base bug would expose).
+    assert_contains(&o.stdout, "[on feat-x]");
     // Readable reason + conclusion printed before the delete.
     assert_contains(&o.stdout, "'feat-x' is fully merged into main");
     assert_contains(&o.stdout, "=> deleting 'feat-x' (verified merged)");
@@ -679,7 +681,7 @@ fn stmb_skips_dirty_repo() {
 
 #[test]
 fn stmb_on_base_branch_switches_without_delete() {
-    // Already on base -> plan switches/pulls but deletes nothing.
+    // Already on base -> plan updates (pulls) but deletes nothing.
     let r = repo_with_remote("stmb-onbase", "main");
     let o = gkit(
         &r.work,
@@ -691,11 +693,69 @@ fn stmb_on_base_branch_switches_without_delete() {
             r.work.to_str().unwrap(),
         ],
     );
-    assert_contains(&o.stdout, "switch to 'main'");
+    assert_contains(&o.stdout, "[on main]");
+    assert_contains(&o.stdout, "update 'main'");
     assert!(
         !o.stdout.contains("delete '"),
         "on base, nothing should be deleted:\n{}",
         o.stdout
+    );
+}
+
+#[test]
+fn stmb_on_base_skips_switch_pulls_only() {
+    // Already on the base branch → no redundant `git switch`; just pull/update.
+    let r = repo_with_remote("stmb-onbase-exec", "main");
+    let o = gkit(
+        &r.work,
+        &["stmb", "--yes", "--base", "main", r.work.to_str().unwrap()],
+    );
+    assert!(
+        !o.stdout.contains("+ git switch"),
+        "on base, no switch should run:\n{}",
+        o.all()
+    );
+    assert_contains(&o.stdout, "+ git pull --rebase origin main");
+    assert_contains(&o.stdout, "update 'main'");
+}
+
+#[test]
+fn stmb_resolves_submodule_base_per_repo_not_root() {
+    // Root tracks main; a submodule tracks dev (gkit.baseBranch=dev) and sits on dev.
+    // stmb must use the submodule's OWN base (dev), NOT the root's main — so it neither
+    // switches the submodule onto main nor treats dev as a deletable feature.
+    let sup = repo_with_remote("stmb-perbase-sup", "main");
+    add_submodule(&sup.work, "stmb-perbase-sub", "child");
+    let child = sup.work.join("child");
+    git_ok(&child, &["checkout", "-b", "dev"]);
+    git_ok(&child, &["push", "-u", "origin", "dev"]);
+    git_ok(&child, &["config", "gkit.baseBranch", "dev"]);
+
+    let o = gkit(
+        &sup.work,
+        &[
+            "stmb",
+            "--yes",
+            "--base",
+            "main",
+            sup.work.to_str().unwrap(),
+        ],
+    );
+    // Plan shows the submodule on its own base dev — and does NOT delete dev.
+    assert_contains(&o.stdout, "[on dev]");
+    assert!(
+        !o.all().contains("delete 'dev'"),
+        "submodule's own base 'dev' must not be treated as a feature:\n{}",
+        o.all()
+    );
+    // Submodule stays on dev — NOT yanked onto the root's main.
+    assert_eq!(
+        git(&child, &["symbolic-ref", "--short", "HEAD"])
+            .stdout
+            .trim(),
+        "dev",
+        "submodule should stay on its own base 'dev':\n{}",
+        o.all()
     );
 }
 
