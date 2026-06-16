@@ -607,10 +607,46 @@ fn stmb_executes_switch_and_delete() {
         &r.work,
         &["stmb", "--yes", "--base", "main", r.work.to_str().unwrap()],
     );
-    assert_contains(&o.stdout, "+ git checkout main");
+    assert_contains(&o.stdout, "+ git switch main");
     assert_contains(&o.stdout, "+ git branch -d feat-x");
     assert_contains(&o.stdout, "--- logoff ---");
     // branch deleted
+    let b = git(&r.work, &["branch", "--list", "feat-x"]);
+    assert!(
+        b.stdout.trim().is_empty(),
+        "feat-x should be deleted:\n{}",
+        o.all()
+    );
+}
+
+#[test]
+fn stmb_switch_handles_path_named_like_base() {
+    // Regression: a tracked worktree path named like the base (`main/`) + no local
+    // `main` branch (only origin/main) made the old `git checkout main` ambiguous
+    // ("could be both a local file and a tracking branch"). `git switch` is branch-only
+    // and DWIMs the remote-tracking branch, so it must now succeed.
+    let r = repo_with_remote("stmb-pathcollide", "main");
+    // Commit a path named like the base on `main`, push it.
+    std::fs::create_dir(r.work.join("main")).unwrap();
+    std::fs::write(r.work.join("main").join("f"), "x\n").unwrap();
+    git_ok(&r.work, &["add", "."]);
+    git_ok(&r.work, &["commit", "-m", "add main/ path"]);
+    git_ok(&r.work, &["push", "origin", "main"]);
+    // Branch off at the same commit (so feat-x is merged → safely deletable), then drop
+    // the local `main` so only origin/main remains (forces git's switch DWIM).
+    git_ok(&r.work, &["checkout", "-b", "feat-x"]);
+    git_ok(&r.work, &["branch", "-D", "main"]);
+
+    let o = gkit(
+        &r.work,
+        &["stmb", "--yes", "--base", "main", r.work.to_str().unwrap()],
+    );
+    assert_contains(&o.stdout, "+ git switch main");
+    assert_contains(&o.stdout, "+ git branch -d feat-x");
+    // Landed on main (the switch succeeded despite the `main/` path).
+    let cur = git(&r.work, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(cur.stdout.trim(), "main", "should be on main:\n{}", o.all());
+    // Feature branch gone.
     let b = git(&r.work, &["branch", "--list", "feat-x"]);
     assert!(
         b.stdout.trim().is_empty(),
@@ -685,7 +721,7 @@ fn stmb_resolves_base_from_config() {
     git_ok(&r.work, &["config", "gkit.baseBranch", "main"]);
     git_ok(&r.work, &["checkout", "-b", "feat-c"]); // at main HEAD -> merged
     let o = gkit(&r.work, &["stmb", "--yes", r.work.to_str().unwrap()]);
-    assert_contains(&o.stdout, "+ git checkout main");
+    assert_contains(&o.stdout, "+ git switch main");
     let b = git(&r.work, &["branch", "--list", "feat-c"]);
     assert!(
         b.stdout.trim().is_empty(),

@@ -206,7 +206,7 @@ fn net_stmb_switch_and_delete() {
         &work,
         &["stmb", "--yes", "--base", "master", work.to_str().unwrap()],
     );
-    assert_contains(&o.stdout, "+ git checkout master");
+    assert_contains(&o.stdout, "+ git switch master");
     assert_contains(&o.stdout, "+ git branch -d feat-net");
     assert_contains(&o.stdout, "--- logoff ---");
     assert!(

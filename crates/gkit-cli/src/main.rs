@@ -709,9 +709,12 @@ fn run_stmb(
         println!("  + git {}", args.join(" "));
         git.run(dir, args)
     };
-    let co = run(&["checkout", base]);
+    // `git switch` (not `checkout`): branch-only, so a worktree path matching the base
+    // name (e.g. a `main/` dir) can't make it ambiguous, while keeping the same DWIM
+    // (auto-create a local branch tracking origin/<base> when absent).
+    let co = run(&["switch", base]);
     if !co.success {
-        return Err(format!("checkout {base} failed: {}", co.stderr.trim()));
+        return Err(format!("switch to {base} failed: {}", co.stderr.trim()));
     }
     let _ = run(&["pull", "--rebase", "origin", base]);
     if let Some(f) = feature {

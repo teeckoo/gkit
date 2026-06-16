@@ -21,8 +21,9 @@ gkit stmb [path] [--base <b>] [--no-recursive] [--force] [-y|--yes] [--dry-run]
    - dirty working tree or detached HEAD → **skip** (reported).
 3. Print the plan. With `--dry-run`, stop here. Otherwise confirm (skip with `-y`).
 4. Execute, **printing each git command** under a per-repo header (transparency,
-   like `clone`): `checkout base` → `pull --rebase origin base` → delete feature →
-   `remote prune origin`.
+   like `clone`): `switch base` → `pull --rebase origin base` → delete feature →
+   `remote prune origin`. (`git switch`, not `checkout`, so a worktree path named like
+   the base — e.g. a `main/` dir — can't make the branch switch ambiguous.)
 5. Automatically run `logoff` (recursive) to confirm everything is clean — after a
    blank line.
 
@@ -45,17 +46,20 @@ unmerged branch** — so you can't silently lose unpushed work. Pass `--force` t
 ## Example
 
 ```text
-$ gkit stmb --base dev --yes ~/work/repo
+$ gkit stmb --yes ~/work/repo          # no --base → base resolved from gkit.baseBranch
 stmb plan (1 repo(s)):
-  .  -> switch to 'dev', pull, delete 'feat-x'
+  .  -> switch to 'main', pull, delete 'feat-x'
 .:
-  + git checkout dev
-  + git pull --rebase origin dev
+  + git switch main
+  + git pull --rebase origin main
   + git branch -d feat-x
   + git remote prune origin
 
 --- logoff ---
-/home/you/work/repo  dev  true
+/home/you/work/repo  main  true
 ```
+
+The base comes from `git config gkit.baseBranch` (then `origin/HEAD`) — pass `--base <b>`
+only to override it for the root, e.g. `gkit stmb --base dev`.
 
 `--dry-run` prints just the plan (the first block) and stops.
