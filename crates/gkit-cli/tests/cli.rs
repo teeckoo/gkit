@@ -1258,12 +1258,45 @@ fn fixsub_switches_detached_submodule_to_branch() {
     );
     let o = gkit(&sup.work, &["fixsub", "-y"]);
     assert_eq!(o.code, 0, "fixsub should succeed:\n{}", o.all());
+    // New: the un-detach is printed per submodule (no swallowed git switch).
+    assert_contains(&o.stdout, "detached HEAD → switching to 'main'");
+    assert_contains(&o.stdout, "+ git switch main");
     assert_eq!(
         git(&child, &["symbolic-ref", "--short", "HEAD"])
             .stdout
             .trim(),
         "main",
         "submodule is back on its branch"
+    );
+}
+
+#[test]
+fn fixsub_reports_divergence_and_keeps_feature_branch() {
+    // A submodule deliberately on a feature branch (≠ its .gitmodules branch) must be
+    // REPORTED, not silently switched — fixsub never yanks a named branch.
+    let sup = repo_with_remote("fixsub-diverge", "main");
+    add_submodule(&sup.work, "fixsub-diverge-sub", "child");
+    let child = sup.work.join("child");
+    git_ok(&child, &["checkout", "-b", "feature-x"]);
+
+    let o = gkit(&sup.work, &["fixsub", "-y"]);
+    assert_eq!(
+        o.code,
+        0,
+        "divergence is reported, not a failure:\n{}",
+        o.all()
+    );
+    assert_contains(&o.stdout, "on 'feature-x'");
+    assert_contains(&o.stdout, ".gitmodules tracks 'main'");
+    assert_contains(&o.stdout, "left as-is");
+    // Crucially: still on feature-x — fixsub did NOT yank it onto main.
+    assert_eq!(
+        git(&child, &["symbolic-ref", "--short", "HEAD"])
+            .stdout
+            .trim(),
+        "feature-x",
+        "fixsub must not yank a feature branch:\n{}",
+        o.all()
     );
 }
 
