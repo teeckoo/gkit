@@ -17,7 +17,8 @@
 //! dir         = "$CP_COMMON_LIBS/cosp"
 //! namespace   = "other-org"   # overrides the global namespace for THIS repo
 //! depth       = 1
-//! branch      = "dev"
+//! branch      = "dev"               # full clone, checked out on dev
+//! # single-branch = true            # add to fetch ONLY `branch` (--single-branch)
 //! clone-flags = ["--no-tags"]
 //! post-clone  = ["mill compile"]
 //! ```
@@ -68,8 +69,16 @@ pub struct Repo {
     pub name: Option<String>,
     #[serde(default)]
     pub depth: Option<u32>,
+    /// Branch (or tag) to check out after clone (`--branch B`). By default this is a
+    /// FULL clone parked on `B` (all branches fetched); set `single-branch = true` to
+    /// fetch only `B`.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Clone only one branch (`--single-branch`). Pairs with `branch` to fetch just
+    /// that branch; on its own (no `branch`) it clones only the remote's default
+    /// branch — same as bare `git clone --single-branch`.
+    #[serde(default)]
+    pub single_branch: bool,
     /// Per-repo raw flags AFTER `clone`.
     #[serde(default)]
     pub clone_flags: Vec<String>,
@@ -231,9 +240,10 @@ post-clone = ["git config gkit.baseBranch main"]   # change to your convention: 
 dir = "$HOME/work/example"
 # namespace   = "other-org"   # override the global namespace for THIS repo
 # name        = "example"     # remote repo name if it differs from the dir basename
-# depth       = 1
-# branch      = "dev"
-# clone-flags = ["--no-tags"]
+# depth         = 1
+# branch        = "dev"     # check out dev (full clone — all branches fetched)
+# single-branch = true      # fetch ONLY `branch` (--single-branch); needs `branch` unless you want just the default branch
+# clone-flags   = ["--no-tags"]
 # post-clone  = ["mill compile"]
 "#
     )
@@ -292,8 +302,19 @@ post-clone = ["mill compile", "echo done"]
         let r = &c.repo[0];
         assert_eq!(r.depth, Some(1));
         assert_eq!(r.branch.as_deref(), Some("dev"));
+        assert!(!r.single_branch); // defaults off → full clone on `branch`
         assert_eq!(r.clone_flags, ["--no-tags"]);
         assert_eq!(r.post_clone.0, ["mill compile", "echo done"]); // list kept
+    }
+
+    #[test]
+    fn parses_single_branch_flag() {
+        let c = parse(
+            "host=\"h\"\nnamespace=\"o\"\n[[repo]]\ndir=\"$H/r\"\nbranch=\"dev\"\nsingle-branch=true\n",
+        )
+        .unwrap();
+        assert_eq!(c.repo[0].branch.as_deref(), Some("dev"));
+        assert!(c.repo[0].single_branch);
     }
 
     #[test]

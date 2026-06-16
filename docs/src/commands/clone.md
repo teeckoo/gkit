@@ -117,7 +117,7 @@ post-clone  = ["echo done $GKIT_REPO"]
 
 ```text
 $ gkit clone repos.toml --user-name "Jane Dev" --user-email jane@example-org.com
-+ git clone --branch dev --single-branch --recurse-submodules --filter=blob:none --no-tags tlbb:example-org/cosp.git /Users/you/work/cosp
++ git clone --branch dev --recurse-submodules --filter=blob:none --no-tags tlbb:example-org/cosp.git /Users/you/work/cosp
 + git config user.name Jane Dev
 + git config user.email jane@example-org.com
 + git submodule foreach --recursive git config user.name 'Jane Dev'; git config user.email 'jane@example-org.com'

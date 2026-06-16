@@ -16,7 +16,7 @@
 //! live) and `$GKIT_REPO`/`GKIT_DIR`/`GKIT_URL`/`GKIT_HOST`/`GKIT_NAMESPACE` set
 //! (plus `GKIT_USER_NAME`/`GKIT_USER_EMAIL`, empty when no identity was given).
 
-use crate::conf::{expand_path, CloneConf};
+use crate::conf::{expand_path, CloneConf, Repo};
 use crate::git::Git;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -129,6 +129,38 @@ pub(crate) fn run_hooks(cmds: &[String], cwd: &Path, env: &[(&str, &str)]) -> Re
     Ok(())
 }
 
+/// Build the `git …` argv (everything after the program name) for one repo's clone:
+/// `git <git-flags> clone [--depth N] [--branch B] [--single-branch] --recurse-submodules
+/// <clone-flags> <repo clone-flags> <url> <dir>`.
+///
+/// `--branch` and `--single-branch` are **independent**: a plain `branch = "B"` checks
+/// out `B` from a FULL clone (all branches fetched), while `single-branch = true` adds
+/// `--single-branch` — paired with `branch` it fetches only `B`; on its own (no
+/// `branch`) it clones only the remote's default branch, exactly as bare `git clone
+/// --single-branch` does.
+fn clone_args(conf: &CloneConf, r: &Repo, url: &str, dir_s: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    args.extend(conf.git_flags.iter().cloned());
+    args.push("clone".into());
+    if let Some(d) = r.depth {
+        args.push("--depth".into());
+        args.push(d.to_string());
+    }
+    if let Some(b) = &r.branch {
+        args.push("--branch".into());
+        args.push(b.clone());
+    }
+    if r.single_branch {
+        args.push("--single-branch".into());
+    }
+    args.push("--recurse-submodules".into());
+    args.extend(conf.clone_flags.iter().cloned());
+    args.extend(r.clone_flags.iter().cloned());
+    args.push(url.to_string());
+    args.push(dir_s.to_string());
+    args
+}
+
 /// Clone every repo in `conf`, printing each step in order. Returns a report per
 /// repo (for the aggregate exit code).
 pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneReport> {
@@ -155,24 +187,7 @@ pub fn clone_all<G: Git>(git: &G, conf: &CloneConf, opts: &Opts) -> Vec<CloneRep
             };
             let url = format!("{}:{}/{}.git", conf.host, ns, name);
 
-            // git <git-flags> clone <depth/branch> --recurse-submodules <clone-flags> <repo flags> <url> <dir>
-            let mut args: Vec<String> = Vec::new();
-            args.extend(conf.git_flags.iter().cloned());
-            args.push("clone".into());
-            if let Some(d) = r.depth {
-                args.push("--depth".into());
-                args.push(d.to_string());
-            }
-            if let Some(b) = &r.branch {
-                args.push("--branch".into());
-                args.push(b.clone());
-                args.push("--single-branch".into());
-            }
-            args.push("--recurse-submodules".into());
-            args.extend(conf.clone_flags.iter().cloned());
-            args.extend(r.clone_flags.iter().cloned());
-            args.push(url.clone());
-            args.push(dir_s.clone());
+            let args = clone_args(conf, r, &url, &dir_s);
             let command = format!("git {}", args.join(" "));
 
             let mk = |outcome| CloneReport {
@@ -372,6 +387,79 @@ mod tests {
         let ns = c.namespace_for(&c.repo[0]).unwrap();
         let url = format!("{}:{}/{}.git", c.host, ns, c.repo[0].name());
         assert_eq!(url, "tlbb:example-org/cosp.git");
+    }
+
+    #[test]
+    fn branch_is_full_clone_by_default() {
+        // a plain `branch` checks out that branch WITHOUT --single-branch (full clone)
+        let c = conf::parse(
+            "host=\"tlbb\"\nnamespace=\"codogenics\"\n\
+             [[repo]]\ndir=\"$HOME/scratch-spark\"\nname=\"spark4beginners\"\n\
+             branch=\"SCB-543-spark-scala-chapter2\"\n",
+        )
+        .unwrap();
+        let args = super::clone_args(
+            &c,
+            &c.repo[0],
+            "tlbb:codogenics/spark4beginners.git",
+            "/h/s",
+        );
+        assert_eq!(
+            args,
+            [
+                "clone",
+                "--branch",
+                "SCB-543-spark-scala-chapter2",
+                "--recurse-submodules",
+                "tlbb:codogenics/spark4beginners.git",
+                "/h/s",
+            ]
+        );
+        assert!(!args.iter().any(|a| a == "--single-branch"));
+    }
+
+    #[test]
+    fn single_branch_true_adds_flag() {
+        // branch + single-branch=true → --branch B --single-branch (the old behavior)
+        let c = conf::parse(
+            "host=\"h\"\nnamespace=\"o\"\n\
+             [[repo]]\ndir=\"$H/r\"\nbranch=\"dev\"\nsingle-branch=true\n",
+        )
+        .unwrap();
+        let args = super::clone_args(&c, &c.repo[0], "h:o/r.git", "/h/r");
+        assert_eq!(
+            args,
+            [
+                "clone",
+                "--branch",
+                "dev",
+                "--single-branch",
+                "--recurse-submodules",
+                "h:o/r.git",
+                "/h/r"
+            ]
+        );
+    }
+
+    #[test]
+    fn single_branch_without_branch_clones_default_only() {
+        // single-branch=true alone → bare --single-branch (remote's default branch only)
+        let c = conf::parse(
+            "host=\"h\"\nnamespace=\"o\"\n[[repo]]\ndir=\"$H/r\"\nsingle-branch=true\n",
+        )
+        .unwrap();
+        let args = super::clone_args(&c, &c.repo[0], "h:o/r.git", "/h/r");
+        assert_eq!(
+            args,
+            [
+                "clone",
+                "--single-branch",
+                "--recurse-submodules",
+                "h:o/r.git",
+                "/h/r"
+            ]
+        );
+        assert!(!args.iter().any(|a| a == "--branch"));
     }
 
     #[test]

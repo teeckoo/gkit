@@ -285,6 +285,7 @@ mod tests {
             name: None,
             depth: None,
             branch: None,
+            single_branch: false,
             clone_flags: vec![],
             pre_clone: Hooks(vec![]),
             post_clone: Hooks(post.iter().map(|s| s.to_string()).collect()),

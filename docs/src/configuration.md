@@ -68,7 +68,8 @@ anything**, naming the offending dir.
 | `namespace` | org/group/user for **this** repo; overrides the global `namespace`. Required only if there's no global one. |
 | `name` | remote repo name (URL's last segment). Defaults to `basename(dir)`; set it to clone a repo into a **differently-named** dir (e.g. `dir = ".../cosp-mirror"`, `name = "cosp"`). |
 | `depth = N` | shallow clone (`--depth N`, implies single-branch). |
-| `branch = "B"` | `--branch B --single-branch`. |
+| `branch = "B"` | check out branch/tag `B` after clone (`--branch B`). **Full clone by default** (all branches fetched); add `single-branch = true` to fetch only `B`. |
+| `single-branch = true` | add `--single-branch`. With `branch` → fetch only that branch; on its own → clone only the remote's default branch (bare `git clone --single-branch`). |
 | `clone-flags` | per-repo raw flags **after** `clone`. |
 | `pre-clone` / `post-clone` | per-repo hook commands (string or list). |
 
@@ -76,7 +77,7 @@ anything**, naming the offending dir.
 
 1. global `pre-clone`
 2. repo `pre-clone`
-3. `git <git-flags> clone [--depth N] [--branch B --single-branch] --recurse-submodules <clone-flags> <repo clone-flags> <url> <dir>` — **printed**, output captured
+3. `git <git-flags> clone [--depth N] [--branch B] [--single-branch] --recurse-submodules <clone-flags> <repo clone-flags> <url> <dir>` — **printed**, output captured
 4. **built-ins** (unless disabled): git identity (`user.name`/`user.email` on the
    repo **and recursively on every submodule**, if resolved — **printed**), submodule
    init + branch-switch, `direnv allow`
