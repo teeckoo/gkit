@@ -595,9 +595,6 @@ struct StmbArgs {
     /// Only the top repo; don't recurse into submodules.
     #[arg(long)]
     no_recursive: bool,
-    /// Force-delete the feature branch even if not fully merged (may lose commits).
-    #[arg(long)]
-    force: bool,
     /// Skip the confirmation prompt.
     #[arg(short = 'y', long)]
     yes: bool,
@@ -659,7 +656,7 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
             Step::Switch { dir, base, feature } => {
                 let del = feature
                     .as_deref()
-                    .map(|f| format!(", delete '{f}'"))
+                    .map(|f| format!(", delete '{f}' if merged"))
                     .unwrap_or_default();
                 println!("  {}  -> switch to '{base}', pull{del}", short(dir, &root));
             }
@@ -679,7 +676,7 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
     for s in &steps {
         if let Step::Switch { dir, base, feature } = s {
             println!("{}:", short(dir, &root));
-            if let Err(e) = run_stmb(&git, dir, base, feature.as_deref(), args.force) {
+            if let Err(e) = run_stmb(&git, dir, base, feature.as_deref()) {
                 eprintln!("gkit stmb: {}: {e}", short(dir, &root));
                 failed = true;
             }
@@ -697,13 +694,7 @@ fn stmb_cmd(args: StmbArgs) -> ExitCode {
     }
 }
 
-fn run_stmb(
-    git: &SystemGit,
-    dir: &Path,
-    base: &str,
-    feature: Option<&str>,
-    force: bool,
-) -> Result<(), String> {
+fn run_stmb(git: &SystemGit, dir: &Path, base: &str, feature: Option<&str>) -> Result<(), String> {
     // Print each git command before running it (transparency, like `clone`).
     let run = |args: &[&str]| {
         println!("  + git {}", args.join(" "));
@@ -716,22 +707,38 @@ fn run_stmb(
     if !co.success {
         return Err(format!("switch to {base} failed: {}", co.stderr.trim()));
     }
+    // Update base first, so the merged-ness check sees freshly-pulled history (a
+    // squash/rebase merge that just landed on the remote must be present locally).
     let _ = run(&["pull", "--rebase", "origin", base]);
     if let Some(f) = feature {
-        let del = run(&["branch", "-d", f]);
-        if !del.success {
-            if force {
-                let force_del = run(&["branch", "-D", f]);
-                if !force_del.success {
-                    return Err(format!(
-                        "force-delete '{f}' failed: {}",
-                        force_del.stderr.trim()
-                    ));
+        // Decide AND explain before touching the branch: print the verdict's reason,
+        // then a one-line conclusion (deleting / not deleting). Transparency first.
+        let status = stmb::merge_status(git, dir, base, f);
+        println!("  {}", status.reason(f, base));
+        match status {
+            // Verified merged into base's history — git's own `-d` will agree.
+            stmb::MergeStatus::Reachable => {
+                println!("  => deleting '{f}' (verified merged).");
+                let del = run(&["branch", "-d", f]);
+                if !del.success {
+                    return Err(format!("delete '{f}' failed: {}", del.stderr.trim()));
                 }
-            } else {
-                return Err(format!(
-                    "'{f}' not fully merged into {base}; rerun with --force to delete anyway"
-                ));
+            }
+            // Verified merged by content — `-d` would wrongly refuse, so `-D` after
+            // we've vouched for it via patch-id.
+            stmb::MergeStatus::Content => {
+                println!("  => deleting '{f}' (verified merged by content).");
+                let del = run(&["branch", "-D", f]);
+                if !del.success {
+                    return Err(format!("delete '{f}' failed: {}", del.stderr.trim()));
+                }
+            }
+            // Not verified merged — refuse and tell the user how to discard it.
+            stmb::MergeStatus::Unmerged { .. } | stmb::MergeStatus::Unknown(_) => {
+                println!(
+                    "  => NOT deleting '{f}'. If you're sure, discard it with: git branch -D {f}"
+                );
+                return Err(format!("'{f}' not deleted ({})", status.reason(f, base)));
             }
         }
     }

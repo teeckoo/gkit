@@ -608,6 +608,9 @@ fn stmb_executes_switch_and_delete() {
         &["stmb", "--yes", "--base", "main", r.work.to_str().unwrap()],
     );
     assert_contains(&o.stdout, "+ git switch main");
+    // Readable reason + conclusion printed before the delete.
+    assert_contains(&o.stdout, "'feat-x' is fully merged into main");
+    assert_contains(&o.stdout, "=> deleting 'feat-x' (verified merged)");
     assert_contains(&o.stdout, "+ git branch -d feat-x");
     assert_contains(&o.stdout, "--- logoff ---");
     // branch deleted
@@ -731,48 +734,67 @@ fn stmb_resolves_base_from_config() {
 }
 
 #[test]
-fn stmb_refuses_unmerged_then_force_deletes() {
+fn stmb_refuses_unmerged_and_explains() {
+    // Genuine unmerged work: stmb prints a readable reason, declines to delete, and
+    // points at `git branch -D`. There is no --force flag; the branch must survive.
     let r = repo_with_remote("stmb-unmerged", "main");
     git_ok(&r.work, &["checkout", "-b", "feat-u"]);
     std::fs::write(r.work.join("u.txt"), "x\n").unwrap();
     git_ok(&r.work, &["add", "."]);
     git_ok(&r.work, &["commit", "-m", "unmerged work"]); // not merged into main
 
-    // On feat-u, no --force: safe-delete refuses; the branch survives.
     let o = gkit(
         &r.work,
         &["stmb", "--yes", "--base", "main", r.work.to_str().unwrap()],
     );
-    assert_contains(&o.all(), "not fully merged");
+    // Reason + conclusion, then the manual-discard hint.
+    assert_contains(&o.all(), "'feat-u' has 1 commit(s) not present in main");
+    assert_contains(&o.all(), "NOT deleting 'feat-u'");
+    assert_contains(&o.all(), "git branch -D feat-u");
     assert_eq!(o.code, 1);
     assert!(
         !git(&r.work, &["branch", "--list", "feat-u"])
             .stdout
             .trim()
             .is_empty(),
-        "feat-u must survive a refused delete"
+        "feat-u must survive a refused delete:\n{}",
+        o.all()
     );
+}
 
-    // Back on feat-u, with --force: deleted.
-    git_ok(&r.work, &["checkout", "feat-u"]);
+#[test]
+fn stmb_deletes_squash_merged_by_content() {
+    // A squash merge gives base a *new* commit (different hash) with the branch's
+    // changes. Reachability says "not merged", but patch-id equivalence proves the
+    // content is in base — stmb must detect this and delete (via `branch -D`).
+    let r = repo_with_remote("stmb-squash", "main");
+    git_ok(&r.work, &["checkout", "-b", "feat-s"]);
+    std::fs::write(r.work.join("s.txt"), "squash me\n").unwrap();
+    git_ok(&r.work, &["add", "."]);
+    git_ok(&r.work, &["commit", "-m", "feature work"]);
+    // Squash-merge feat-s into main: same diff, brand-new commit hash.
+    git_ok(&r.work, &["checkout", "main"]);
+    git_ok(&r.work, &["merge", "--squash", "feat-s"]);
+    git_ok(&r.work, &["commit", "-m", "SCB squashed feat-s"]);
+    // Back on the (pre-squash) feature branch — this is the real-world state.
+    git_ok(&r.work, &["checkout", "feat-s"]);
+
     let o = gkit(
         &r.work,
-        &[
-            "stmb",
-            "--yes",
-            "--force",
-            "--base",
-            "main",
-            r.work.to_str().unwrap(),
-        ],
+        &["stmb", "--yes", "--base", "main", r.work.to_str().unwrap()],
     );
-    assert_contains(&o.stdout, "+ git branch -D feat-u");
+    assert_contains(&o.stdout, "squash/rebase-merged");
+    assert_contains(
+        &o.stdout,
+        "=> deleting 'feat-s' (verified merged by content)",
+    );
+    assert_contains(&o.stdout, "+ git branch -D feat-s");
     assert!(
-        git(&r.work, &["branch", "--list", "feat-u"])
+        git(&r.work, &["branch", "--list", "feat-s"])
             .stdout
             .trim()
             .is_empty(),
-        "feat-u should be force-deleted:\n{}",
+        "feat-s should be deleted (merged by content):\n{}",
         o.all()
     );
 }

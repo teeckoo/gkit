@@ -61,8 +61,10 @@ failing check failed. `gkit logoff -e` lists the numbered rules.
 gkit stmb ~/work/cp-conf
 ```
 
-Switches back to the base branch, pulls, **safe-deletes** the feature branch
-(refuses if unmerged unless you pass `--force`), recursively across submodules, and
+Switches back to the base branch, pulls, then **deletes the feature branch only
+after verifying it's merged** (by reachability *or* patch-id content match, so
+squash/rebase merges are recognized) — printing a readable reason; it refuses an
+unverified branch rather than offering a force flag. Recursive across submodules, and
 runs a verifying log-off check. Use `--dry-run` to preview.
 
 Next: the full [Configuration](./configuration.md) reference.

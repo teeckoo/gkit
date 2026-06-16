@@ -55,7 +55,7 @@ cargo install --git https://github.com/teeckoo/gkit gkit
 | `gkit clone <conf…>` | Clone repos from the given conf file(s) (`repos.toml`, or `*.toml` for a whole dir — a directory arg isn't accepted); submodules switched onto their branch, `.envrc` trusted, every command printed. `--user-name`/`--user-email` (or a prompt) stamp your git identity on each clone. |
 | `gkit stamp [path…]` | Re-apply a conf's `post-clone` over **existing** repos (no cloning). Repo-mode (default) acts on the repo path(s)/cwd, reading each repo's `gkit.conf`; **`--conf <conf…>`** re-applies the named conf(s) to every repo and back-fills `gkit.conf`. Same `--conf` shape as `logoff`. `--dry-run`/`-y`. |
 | `gkit logoff [path…]` | Is every repo **+ submodule** committed and pushed? Exit 0 = all clear. `-v` for a greppable per-check breakdown (`-vv` adds why each failing check failed; `-e` lists the rules); **`--conf <conf…>`** to check every repo in your clone conf(s). |
-| `gkit stmb [path]` | "Switch to main branch": return to the base branch, update it, and **safe-delete** the finished feature branch — recursively across submodules. |
+| `gkit stmb [path]` | "Switch to main branch": return to the base branch, update it, and delete the finished feature branch **only after verifying it's merged** (reachability or patch-id content match, so squash/rebase merges count; refuses + explains otherwise) — recursively across submodules. |
 | `gkit fixsub [path]` | Fix submodule metadata: switch each submodule onto its `.gitmodules` branch (un-detach after `submodule update --init`) and inherit the root's git identity where missing. `--dry-run`/`-y`/`--no-direnv`. |
 
 ## Quick start

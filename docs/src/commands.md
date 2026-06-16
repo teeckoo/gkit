@@ -23,7 +23,7 @@ fleet from a conf):
 | [`clone`](./commands/clone.md) | Clone the repos in a conf file, with hooks and transparent commands. |
 | [`stamp`](./commands/stamp.md) | Re-apply a conf's `post-clone` over existing repos (e.g. stamp config on a late-added submodule). |
 | [`logoff`](./commands/logoff.md) | Gate: is every repo + submodule committed and pushed? |
-| [`stmb`](./commands/stmb.md) | Switch to the base branch and safe-delete a finished feature, recursively. |
+| [`stmb`](./commands/stmb.md) | Switch to the base branch and delete a finished feature once verified merged (reachability or patch-id content match), recursively. |
 | [`fixsub`](./commands/fixsub.md) | Fix submodule metadata: switch each onto its `.gitmodules` branch and inherit the root identity. |
 
 Run `gkit <command> --help` for the authoritative flag list.
