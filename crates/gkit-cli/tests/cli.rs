@@ -818,6 +818,64 @@ fn clone_directory_arg_errors() {
     assert_eq!(o.code, 2);
 }
 
+// ---------------------------------------------------------------- clone insteadOf routing
+
+/// Set up a temp HOME with a git_users alias + an already-cloned [[repo]] (so the
+/// clone is skipped, no network), returns (home, conf-path).
+fn insteadof_fixture(
+    tag: &str,
+    alias: &str,
+    hostname: &str,
+    ns: &str,
+) -> (std::path::PathBuf, String) {
+    let home = temp_dir(tag);
+    write_git_users(&home, alias, hostname);
+    let repodir = home.join("work/myrepo");
+    std::fs::create_dir_all(&repodir).unwrap();
+    git_ok(&repodir, &["init", "-q"]);
+    let conf = format!(
+        "host = \"{alias}\"\nnamespace = \"{ns}\"\n[[repo]]\ndir = '{}'\n",
+        repodir.display()
+    );
+    let cf = write_conf(&home, "io.toml", &conf);
+    (home, cf)
+}
+
+#[test]
+fn clone_writes_namespace_scoped_insteadof_and_include() {
+    let (home, cf) = insteadof_fixture("io-home", "myalias", "example.com", "myns");
+    let o = gkit_home(&home, &["clone", "--no-direnv", &cf]);
+    assert_eq!(
+        o.code,
+        0,
+        "clone (skipping existing repo) should succeed:\n{}",
+        o.all()
+    );
+    // The gkit-owned routing file got the namespace-scoped rule.
+    let routing = std::fs::read_to_string(home.join(".gitconfig-gkit")).unwrap_or_default();
+    assert_contains(&routing, "myalias:myns/"); // the [url "myalias:myns/"] section
+    assert_contains(&routing, "git@example.com:myns/"); // the insteadOf value
+                                                        // ~/.gitconfig (isolated) now includes the routing file.
+    let global = std::fs::read_to_string(home.join("gitconfig")).unwrap_or_default();
+    assert_contains(&global, ".gitconfig-gkit");
+}
+
+#[test]
+fn clone_no_insteadof_skips_routing() {
+    let (home, cf) = insteadof_fixture("io-skip", "myalias", "example.com", "myns");
+    let o = gkit_home(&home, &["clone", "--no-direnv", "--no-insteadof", &cf]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    assert!(
+        !home.join(".gitconfig-gkit").exists(),
+        "--no-insteadof must not write the routing file"
+    );
+    let global = std::fs::read_to_string(home.join("gitconfig")).unwrap_or_default();
+    assert!(
+        !global.contains(".gitconfig-gkit"),
+        "no include should be added"
+    );
+}
+
 // ---------------------------------------------------------------- init
 
 #[test]

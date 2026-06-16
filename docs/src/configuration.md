@@ -110,6 +110,26 @@ Project-specific config that isn't a gkit concept (e.g. `core.hooksPath .githook
 belongs in `post-clone`, not in a gkit built-in — so `gkit stamp` re-applies it like
 any other hook.
 
+### The ssh alias vs checked-in URLs (`insteadOf` routing)
+
+The conf's `host` is an **ssh Host alias** (`tlbb`) — purely *local key-selection*
+(`tlbb` ≡ `git@bitbucket.org` + `~/.ssh/id_tlbb`). It must **not** end up in checked-in
+URLs: a teammate without that alias can't resolve `tlbb:org/repo.git`. So submodule URLs
+in `.gitmodules` should be **canonical** — `git@<hostname>:<ns>/repo.git` — and each gkit
+developer gets a local rewrite that routes them through the alias's key:
+
+```sh
+git config url."tlbb:codogenics/".insteadOf "git@bitbucket.org:codogenics/"
+```
+
+`gkit clone` writes this rule for you (see [`clone`](./commands/clone.md) → *SSH-alias
+routing*), **namespace-scoped** so multiple aliases on the same host (different clients)
+keep their own keys, into a gkit-owned `~/.gitconfig-gkit` that `~/.gitconfig`
+`[include]`s. The rules are derived (alias + namespace from the conf, hostname from
+`git_users`), so they're regenerable. Migrating an existing repo's `.gitmodules` from
+alias to canonical URLs is a one-time manual git op (`git config -f .gitmodules
+submodule.<n>.url git@<host>:<ns>/x.git` + `git submodule sync`).
+
 ## Built-in, stateless post-clone
 
 Derived from each repo's own on-disk metadata — no config needed:

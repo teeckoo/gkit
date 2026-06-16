@@ -105,6 +105,31 @@ pub fn gkit(cwd: &Path, args: &[&str]) -> Out {
     run(c)
 }
 
+/// Run `gkit` with `HOME` pointed at `home` and an **isolated** per-home global
+/// gitconfig (`home/gitconfig`), so `insteadOf`/`include.path` writes (which gkit
+/// derives from `home/.ssh/git_users` and resolves via `$HOME`) are contained and
+/// assertable without touching the shared fixtures. cwd = `home`.
+pub fn gkit_home(home: &Path, args: &[&str]) -> Out {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_gkit"));
+    c.current_dir(home).args(args);
+    apply_env(&mut c);
+    c.env("HOME", home);
+    c.env("GIT_CONFIG_GLOBAL", home.join("gitconfig"));
+    run(c)
+}
+
+/// Write `home/.ssh/git_users` with one `Host <alias>` block (HostName + key), for
+/// tests that exercise alias → HostName resolution.
+pub fn write_git_users(home: &Path, alias: &str, hostname: &str) {
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(
+        ssh.join("git_users"),
+        format!("Host {alias}\n  HostName {hostname}\n  IdentityFile ~/.ssh/id_{alias}\n"),
+    )
+    .unwrap();
+}
+
 /// Unique fixture dir for one test (created). `tag` must be filesystem-safe.
 pub fn temp_dir(tag: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);

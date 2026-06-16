@@ -118,6 +118,10 @@ struct CloneArgs {
     /// `git config user.email` to stamp on each cloned repo (see `--user-name`).
     #[arg(long)]
     user_email: Option<String>,
+    /// Don't write the namespace-scoped `insteadOf` routing rule (`url.<alias>:<ns>/`
+    /// → `git@<host>:<ns>/`) that lets canonical submodule URLs use this alias's key.
+    #[arg(long)]
+    no_insteadof: bool,
 }
 
 /// Resolve explicit conf-file arguments to a de-duplicated list. At least one is
@@ -158,6 +162,8 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
     let user_email = resolve_identity(args.user_email, interactive, || {
         prompt_identity("git user.email", git_config_global("user.email"))
     });
+    // gkit-owned ssh aliases (alias → HostName), read once for the insteadOf setup.
+    let git_users = std::fs::read_to_string(ssh_dir().join("git_users")).unwrap_or_default();
     let mut failed = false;
     for conf_path in &confs {
         if confs.len() > 1 {
@@ -184,6 +190,12 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
             eprintln!("gkit: {}: {e}", conf_path.display());
             failed = true;
             continue;
+        }
+        // Write the namespace-scoped insteadOf routing rule(s) for this conf's alias,
+        // so a *canonical* submodule URL (git@host:ns/…) routes through this alias's
+        // key — keeping the alias out of checked-in URLs. Done before the clones.
+        if !args.no_insteadof {
+            setup_insteadof(&git_users, &cfg);
         }
         // Stamp the absolute conf path as gkit.conf on each cloned repo so a later
         // `gkit stamp` (no arg, inside the repo) can resolve this conf. Built per-conf.
@@ -212,6 +224,61 @@ fn clone_cmd(args: CloneArgs) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Write the namespace-scoped `insteadOf` routing rules for `cfg`'s alias into the
+/// gkit-owned routing file (`~/.gitconfig-gkit`), and ensure `~/.gitconfig` `[include]`s
+/// it — so a *canonical* submodule URL routes through this alias's key. Printed,
+/// idempotent. Skips with a warning when the alias has no `HostName` in `git_users`.
+/// gkit owns/regenerates the routing file (delete it → a re-clone rebuilds it) and
+/// never edits `~/.gitconfig` beyond the one `include.path` entry.
+fn setup_insteadof(git_users: &str, cfg: &conf::CloneConf) {
+    let hostname = match key::hostname_for(git_users, &cfg.host) {
+        Some(h) => h,
+        None => {
+            eprintln!(
+                "gkit: warning: no HostName for ssh alias '{}' in ~/.ssh/git_users — \
+                 skipping insteadOf routing (run `gkit key add {}` to enable it)",
+                cfg.host, cfg.host
+            );
+            return;
+        }
+    };
+    let home = key::home_from_env(|k| std::env::var(k).ok()).unwrap_or_else(|| PathBuf::from("."));
+    let routing = home.join(".gitconfig-gkit").to_string_lossy().into_owned();
+    let git = SystemGit;
+
+    // Ensure ~/.gitconfig includes the gkit routing file (idempotent — add once).
+    let have = git.run(
+        Path::new("."),
+        &["config", "--global", "--get-all", "include.path"],
+    );
+    if !have.stdout.lines().any(|l| l.trim() == routing) {
+        println!("+ git config --global --add include.path {routing}");
+        let out = git.run(
+            Path::new("."),
+            &["config", "--global", "--add", "include.path", &routing],
+        );
+        if !out.success {
+            eprintln!(
+                "gkit: warning: could not add include.path: {}",
+                out.stderr.trim()
+            );
+        }
+    }
+
+    // One namespace-scoped rule per distinct namespace, into the routing file.
+    for ns in clone::distinct_namespaces(cfg) {
+        let (key, val) = clone::insteadof_pair(&cfg.host, &hostname, &ns);
+        println!("+ git config -f {routing} --replace-all {key} {val}");
+        let out = git.run(
+            Path::new("."),
+            &["config", "-f", &routing, "--replace-all", &key, &val],
+        );
+        if !out.success {
+            eprintln!("gkit: warning: could not set {key}: {}", out.stderr.trim());
+        }
     }
 }
 

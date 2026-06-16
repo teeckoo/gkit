@@ -65,6 +65,11 @@ Host acme
   IdentityFile ~/.ssh/id_acme
 ```
 
+The `HostName` is now also **consumed by [`gkit clone`](./clone.md)**: it resolves the
+alias → real host to write the namespace-scoped `insteadOf` routing rule (so canonical
+`git@<hostname>:…` URLs route through this key). A correct `HostName` therefore matters
+beyond ssh itself.
+
 ### `list`
 
 Lists the `Host` aliases (and their `IdentityFile`) gkit owns in `~/.ssh/git_users`.

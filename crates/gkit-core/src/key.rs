@@ -168,6 +168,26 @@ pub fn list_hosts(git_users: &str) -> Vec<(String, String)> {
     hosts
 }
 
+/// The `HostName` of the `Host <alias>` block in `git_users`, or `None` if the alias
+/// has no block / no `HostName`. Lets `gkit clone` resolve an ssh alias (e.g. `tlbb`)
+/// to its real host (`bitbucket.org`) so it can write the namespace-scoped
+/// `url."<alias>:<ns>/".insteadOf "git@<hostname>:<ns>/"` rewrite — keeping the alias
+/// out of checked-in URLs while still routing through the per-alias key.
+pub fn hostname_for(git_users: &str, alias: &str) -> Option<String> {
+    let mut in_block = false;
+    for line in git_users.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("Host ") {
+            in_block = rest.split_whitespace().next() == Some(alias);
+        } else if in_block {
+            if let Some(h) = t.strip_prefix("HostName ") {
+                return Some(h.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +328,22 @@ mod tests {
                 ("acme".into(), "~/.ssh/id_acme".into()),
                 ("work".into(), "~/.ssh/id_work".into())
             ]
+        );
+    }
+
+    #[test]
+    fn hostname_for_resolves_per_block() {
+        // Two aliases on the same host with different keys (the multi-client case):
+        // each resolves its OWN HostName, scoped to its block.
+        let g = "Host ltlgh\n  HostName github.com\n  IdentityFile ~/.ssh/id_ltlgh\n\
+                 Host tlbb\n  HostName bitbucket.org\n  IdentityFile ~/.ssh/id_tlbb\n";
+        assert_eq!(hostname_for(g, "ltlgh").as_deref(), Some("github.com"));
+        assert_eq!(hostname_for(g, "tlbb").as_deref(), Some("bitbucket.org"));
+        // unknown alias, or a block with no HostName → None
+        assert_eq!(hostname_for(g, "nope"), None);
+        assert_eq!(
+            hostname_for("Host x\n  IdentityFile ~/.ssh/id_x\n", "x"),
+            None
         );
     }
 }

@@ -82,6 +82,33 @@ fn submodule_identity_cmd(user_name: Option<&str>, user_email: Option<&str>) -> 
     (!parts.is_empty()).then(|| parts.join("; "))
 }
 
+/// The git-config `(key, value)` for the **namespace-scoped** `insteadOf` rewrite that
+/// lets a *canonical* submodule URL route through the alias's key:
+///   key   = `url.<alias>:<ns>/.insteadOf`   value = `git@<hostname>:<ns>/`
+/// so git rewrites `git@<hostname>:<ns>/repo.git` → `<alias>:<ns>/repo.git` → `id_<alias>`.
+/// The trailing `/` on both sides scopes the rule to the namespace (so multiple aliases
+/// on the same host — different clients — each keep their own key).
+pub fn insteadof_pair(alias: &str, hostname: &str, ns: &str) -> (String, String) {
+    (
+        format!("url.{alias}:{ns}/.insteadOf"),
+        format!("git@{hostname}:{ns}/"),
+    )
+}
+
+/// Distinct namespaces across a conf's repos (each repo's effective namespace), in
+/// conf order, deduplicated — one `insteadOf` rule is written per distinct namespace.
+pub fn distinct_namespaces(conf: &CloneConf) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in &conf.repo {
+        if let Some(ns) = conf.namespace_for(r) {
+            if !out.iter().any(|n| n == ns) {
+                out.push(ns.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Run hook commands via `sh -c` in `cwd` with `env` set; output inherited; each
 /// printed `+ <cmd>`. Stops at the first non-zero exit. Shared with `stamp`, which
 /// re-runs a conf's `post-clone` over an existing tree.
@@ -298,6 +325,36 @@ mod tests {
             Some(r"git config user.name 'O'\''Brien'")
         );
         assert_eq!(sh_squote("a b"), "'a b'");
+    }
+
+    #[test]
+    fn insteadof_pair_is_namespace_scoped() {
+        // bitbucket client
+        assert_eq!(
+            super::insteadof_pair("tlbb", "bitbucket.org", "codogenics"),
+            (
+                "url.tlbb:codogenics/.insteadOf".to_string(),
+                "git@bitbucket.org:codogenics/".to_string()
+            )
+        );
+        // gitlab subgroup namespace keeps its slash
+        assert_eq!(
+            super::insteadof_pair("ctl", "gitlab.com", "grp/sub").1,
+            "git@gitlab.com:grp/sub/"
+        );
+    }
+
+    #[test]
+    fn distinct_namespaces_dedups_in_order() {
+        let c = conf::parse(
+            "host=\"h\"\nnamespace=\"glob\"\n\
+             [[repo]]\ndir=\"$H/a\"\n\
+             [[repo]]\ndir=\"$H/b\"\nnamespace=\"bob\"\n\
+             [[repo]]\ndir=\"$H/c\"\n",
+        )
+        .unwrap();
+        // glob (a), bob (b override), glob again (c) → [glob, bob], deduped, in order
+        assert_eq!(super::distinct_namespaces(&c), vec!["glob", "bob"]);
     }
 
     #[test]

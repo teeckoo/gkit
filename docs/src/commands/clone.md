@@ -7,7 +7,7 @@ command is printed (transparency); all subprocess output is captured so a noisy
 ## Synopsis
 
 ```sh
-gkit clone <conf…> [--user-name <n>] [--user-email <e>] [--no-submodule-branch] [--no-direnv]
+gkit clone <conf…> [--user-name <n>] [--user-email <e>] [--no-submodule-branch] [--no-direnv] [--no-insteadof]
 ```
 
 `conf…` are **explicit conf file(s)** — at least one is required, and a directory
@@ -40,6 +40,31 @@ rest still run and the exit code is non-zero if anything failed.
    (`--no-submodule-branch` to skip).
 6. **`.envrc`** → `direnv allow` (trust-only, no evaluation; `--no-direnv` to skip).
 
+## SSH-alias routing (`insteadOf`) — once per conf
+
+The ssh alias (the conf's `host`, e.g. `tlbb`) is **local key-selection**, so it
+shouldn't appear in checked-in URLs (a teammate without that alias can't resolve
+`tlbb:org/repo.git`). Submodule URLs in `.gitmodules` should therefore be **canonical**
+— `git@<hostname>:<ns>/repo.git` — which anyone can clone with their own key. To keep
+*your* clones routing through the alias's key, `gkit clone` writes a **namespace-scoped
+`insteadOf` rule** (printed, idempotent), once per namespace in the conf:
+
+```sh
+git config -f ~/.gitconfig-gkit --replace-all url."tlbb:codogenics/".insteadOf "git@bitbucket.org:codogenics/"
+```
+
+so git rewrites a canonical `git@bitbucket.org:codogenics/x.git` → `tlbb:codogenics/x.git`
+→ `~/.ssh/id_tlbb`. The **namespace scope** (`codogenics/`) means multiple aliases on
+the *same host* (different clients) each keep their own key. The hostname is resolved
+from the `Host <alias>` block gkit wrote in `~/.ssh/git_users`.
+
+gkit writes these rules to a **gkit-owned file** (`~/.gitconfig-gkit`) and ensures one
+`[include]` line in `~/.gitconfig` — mirroring how it owns `~/.ssh/git_users` and adds
+one `Include` to `~/.ssh/config`. So the rules are **regenerable** (delete the file → a
+re-clone rebuilds them) and gkit never edits your `~/.gitconfig` otherwise. Skip with
+**`--no-insteadof`**; if the alias has no `HostName` in `git_users`, gkit warns and
+skips (your clone still works via the alias).
+
 ## Git identity (`--user-name` / `--user-email`)
 
 Identity is **per-invocation, never in the conf** — the conf is shared across a
@@ -69,6 +94,7 @@ The resolved values are also exported to hooks as `$GKIT_USER_NAME` /
 | `--user-email <e>` | `git config user.email` to stamp on each cloned repo (prompted if omitted in a terminal). |
 | `--no-submodule-branch` | Leave submodules detached (don't switch to their branch). |
 | `--no-direnv` | Don't `direnv allow` repos that have an `.envrc`. |
+| `--no-insteadof` | Don't write the namespace-scoped `insteadOf` routing rule for the conf's ssh alias. |
 
 Per-repo customization (`depth`, `branch`, `clone-flags`), global
 `git-flags`/`clone-flags`, and `pre-clone`/`post-clone` hooks live in the
