@@ -109,14 +109,28 @@ pub fn distinct_namespaces(conf: &CloneConf) -> Vec<String> {
     out
 }
 
-/// Run hook commands via `sh -c` in `cwd` with `env` set; output inherited; each
-/// printed `+ <cmd>`. Stops at the first non-zero exit. Shared with `stamp`, which
-/// re-runs a conf's `post-clone` over an existing tree.
+/// Run hook commands, **fail-fast**, with `env` set and output inherited; each printed
+/// `+ <cmd>`. Shared with `stamp`, which re-runs a conf's `post-clone` over an existing tree.
+///
+/// **Each command runs as its own `sh -ec '<cmd>'` process with cwd = `cwd` (the repo
+/// root).** Two consequences worth knowing when writing conf hooks:
+/// - **`set -e` (the `-e`)** → a multi-step command fails fast *within* the line: e.g.
+///   `cd sub; git config …` stops if `cd sub` fails (the `git config` never runs). So you
+///   don't need defensive `&&` chaining or `|| true` to keep a bad step from doing damage.
+/// - **fresh process per line, from the repo root** → cwd does **not** persist across
+///   lines (a `cd` on one line can't leak into the next — equivalent to a subshell, but
+///   stronger). Keep a `cd` and its command on the *same* line: `cd sub && git config …`.
+///
+/// The whole array is still fail-fast: the first command that exits non-zero aborts the
+/// rest and returns `Err` (the caller marks the repo `FAILED`). A genuinely tolerable
+/// command can still opt out with an explicit `cmd || true` — that's no longer mandatory
+/// boilerplate, just an occasional, deliberate choice.
 pub(crate) fn run_hooks(cmds: &[String], cwd: &Path, env: &[(&str, &str)]) -> Result<(), String> {
     for cmd in cmds {
         println!("+ {cmd}");
         let mut c = Command::new("sh");
-        c.arg("-c").arg(cmd).current_dir(cwd);
+        // `-e`: abort the command at its first failing step (within-line fail-fast).
+        c.arg("-e").arg("-c").arg(cmd).current_dir(cwd);
         for (k, v) in env {
             c.env(k, v);
         }

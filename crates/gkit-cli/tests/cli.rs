@@ -1147,6 +1147,84 @@ fn stamp_no_post_clone_skips() {
 }
 
 #[test]
+fn stamp_hook_fails_fast_within_line() {
+    // `set -e`: a multi-step hook line stops at its first failing step. With a SEMICOLON
+    // (no `&&`), `cd nope-dir; git config …` must still NOT run the `git config` once `cd`
+    // fails — and the repo is reported FAILED, not silently half-applied. (Without set -e
+    // this test would fail: the config would be set and the line would exit 0.)
+    let r = repo_with_remote("stamp-failfast", "main");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"cd nope-dir; git config gkit.baseBranch dev\"]\n[[repo]]\ndir = '{}'\n",
+        r.work.display()
+    );
+    let cf = write_conf(&r.work, "stamp.toml", &conf);
+    let o = gkit(&r.work, &["stamp", "--conf", &cf, "-y"]);
+    assert_eq!(
+        o.code,
+        1,
+        "a failing hook step must fail the repo:\n{}",
+        o.all()
+    );
+    assert_contains(&o.all(), "FAILED");
+    assert!(
+        !git(&r.work, &["config", "--local", "gkit.baseBranch"]).ok,
+        "the step after the failed `cd` must NOT have run:\n{}",
+        o.all()
+    );
+}
+
+#[test]
+fn stamp_cd_does_not_leak_across_lines() {
+    // Each hook line runs as its own `sh` from the repo root, so a `cd` on one line can't
+    // derail the next. If cwd leaked, line 2's `cd childB` (run from inside childA) would
+    // fail and childB would be unset. Both being set proves the isolation.
+    let sup = repo_with_remote("stamp-cdleak", "main");
+    add_submodule(&sup.work, "stamp-cdleak-a", "childA");
+    add_submodule(&sup.work, "stamp-cdleak-b", "childB");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"cd childA && git config gkit.baseBranch dev\", \
+         \"cd childB && git config gkit.baseBranch dev\"]\n[[repo]]\ndir = '{}'\n",
+        sup.work.display()
+    );
+    let cf = write_conf(&sup.work, "stamp.toml", &conf);
+    let o = gkit(&sup.work, &["stamp", "--conf", &cf, "-y"]);
+    assert_eq!(o.code, 0, "{}", o.all());
+    for c in ["childA", "childB"] {
+        assert_eq!(
+            git(&sup.work.join(c), &["config", "--local", "gkit.baseBranch"])
+                .stdout
+                .trim(),
+            "dev",
+            "{c} must be set — a `cd` on the previous line must not leak:\n{}",
+            o.all()
+        );
+    }
+}
+
+#[test]
+fn stamp_foreach_without_or_true_succeeds_on_no_submodules() {
+    // Dropping `|| true` is safe under fail-fast: `git submodule foreach` exits 0 even
+    // with no submodules, so a bare (no `|| true`) foreach hook must not abort the repo.
+    let r = repo_with_remote("stamp-foreach", "main");
+    let conf = format!(
+        "host = \"h\"\nnamespace = \"n\"\n\
+         post-clone = [\"git submodule foreach --recursive 'git config gkit.baseBranch dev'\"]\n\
+         [[repo]]\ndir = '{}'\n",
+        r.work.display()
+    );
+    let cf = write_conf(&r.work, "stamp.toml", &conf);
+    let o = gkit(&r.work, &["stamp", "--conf", &cf, "-y"]);
+    assert_eq!(
+        o.code,
+        0,
+        "a bare foreach (no `|| true`) with no submodules must not fail:\n{}",
+        o.all()
+    );
+}
+
+#[test]
 fn stamp_conf_no_paths_errors() {
     // conf-mode still requires explicit conf file(s), like `logoff --conf`.
     let d = temp_dir("stamp-conf-bare");

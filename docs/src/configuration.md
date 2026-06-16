@@ -84,11 +84,19 @@ anything**, naming the offending dir.
 5. global `post-clone`
 6. repo `post-clone`
 
-Hooks run via `sh -c`, output shown live, with `$GKIT_REPO`, `$GKIT_DIR`,
-`$GKIT_URL`, `$GKIT_HOST`, `$GKIT_NAMESPACE` set — plus `$GKIT_USER_NAME` /
-`$GKIT_USER_EMAIL` (the resolved identity, empty when unset). Pre runs in the
-parent of the target dir; post runs inside the cloned repo. A hook that exits
-non-zero fails that repo.
+Each hook command runs as its own **`sh -ec '<cmd>'`** (so `set -e` is on), output
+shown live, with `$GKIT_REPO`, `$GKIT_DIR`, `$GKIT_URL`, `$GKIT_HOST`,
+`$GKIT_NAMESPACE` set — plus `$GKIT_USER_NAME` / `$GKIT_USER_EMAIL` (the resolved
+identity, empty when unset). Pre runs in the parent of the target dir; post runs
+inside the cloned repo. **Fail-fast** at two levels: a hook line stops at its first
+failing step (`set -e` — e.g. `cd sub; cmd` won't run `cmd` if `cd sub` fails), and
+the first hook line that exits non-zero fails that repo (the rest don't run). So you
+don't need defensive `|| true` to stop a bad step from doing damage — write
+`cmd || true` only on the rare command you *deliberately* want to tolerate.
+
+**`cd` is per line.** Each line starts fresh from the repo root, so a `cd` on one
+line does **not** carry into the next (no cross-line leak). Keep a `cd` with its
+command: `cd sub && git config …` (or just use `git -C sub config …`).
 
 Git identity is **not** a conf key (the conf is shared across a team): it comes
 from the `clone` `--user-name`/`--user-email` flags, or an interactive prompt when
